@@ -40,6 +40,44 @@ radii.
 | codecs | `AppendF16`, `DecodeF16Into` (round to nearest even), `AppendI8`, `DecodeI8Into` (half away from zero, saturating) |
 | kernels | `Dot`, `L2Sq`, `CosineSim`, `Score`, `Dots` |
 | types | `Vector[T]`, `Rows[T]`, `Sparse[T]`, `Metric` (`L2`, `Cosine`, `InnerProduct`) |
+| recall tuning (`recall`) | `New`, `Controller`, `Offer`, `Due`, `Measure`, `Tuned`, `Set`, `Source`, `Knobs`, `Depth`, `Overlap` |
+
+## Tune recall
+
+`github.com/axiomhq/ivfq/recall` holds an index at a recall@k target by
+moving two knobs from a sample of live queries.
+
+1. Build one controller: `c := recall.New(recall.Config{})` (target 0.95, 1 in 100 queries, 30 s between measurements).
+2. Run each query at `c.Tuned(recall.Key{Index: name, Field: field})`.
+3. After it, if `c.Offer(name)` and `c.Due(name)`, call `c.Measure(ctx, key, src)`, in the background if you like.
+
+What it tunes:
+
+| knob | range | order |
+| --- | --- | --- |
+| `Knobs.Probes` | `MinProbes` (16) to 2 × `DefaultNprobe` | spent first, bought back second |
+| `Knobs.Depth`, clusters the bound-pruned rerank reads | `None`, 8, 16, 32, 64, `Unbounded` | bought back first, spent second |
+
+What `src` (a `recall.Source`, one sampled query on one view) gives it:
+
+| method | returns |
+| --- | --- |
+| `Clusters()` | cluster count, and how many are cached |
+| `Search(ctx, knobs)` | top-k ids at those knobs, and whether it answered exactly anyway |
+| `Exact(ctx)` | the true top-k ids |
+| `Reranked()` | rows live queries' rerank read since the last call |
+
+Guarantees:
+
+- Never below the floor: probes stay at or above 16, and a move that drops
+  recall more than 0.02 under the target is undone and its value pinned as
+  a floor for good.
+- Only tunes on warm data: under 99% of clusters cached, `Measure` returns
+  `ErrCold` before either arm runs.
+- One knob per move, at least `MoveSamples` (5) samples apart, so each
+  sample measures one change.
+- Filtered queries tune probes on their own and keep an unbounded depth.
+- No I/O, no goroutines. State lives in memory; `Set` restores it.
 
 K-means seeds with greedy k-means++ and assigns in one parallel pass; the
 result is bit-identical whatever `GOMAXPROCS` is.
