@@ -39,8 +39,18 @@ radii.
 | quantizer | `Quantize`, `Quantizer`, `Code`, `Query`, `Scorer`, `Scorer.ScoreAndBound`, `Rotation` |
 | codecs | `AppendF16`, `DecodeF16Into` (round to nearest even), `AppendI8`, `DecodeI8Into` (half away from zero, saturating) |
 | kernels | `Dot`, `L2Sq`, `CosineSim`, `Score`, `Dots` |
+| scoring | `LateInteractionScore`, `ValidateLateInteraction` |
 | types | `Vector[T]`, `Rows[T]`, `Sparse[T]`, `Metric` (`L2`, `Cosine`, `InnerProduct`) |
 | recall tuning (`recall`) | `New`, `Controller`, `Offer`, `Due`, `Measure`, `Tuned`, `Set`, `Source`, `Knobs`, `Depth`, `Overlap` |
+| rank (`rank`) | `Hit`, `TopK`, `Select`, `Fusion`, `RRF` |
+
+## Rank
+
+`github.com/axiomhq/ivfq/rank` orders hits by score descending, ties by id ascending.
+
+1. Select the top k as you score: `sel := rank.NewTopK(k)`, `sel.Push(id, score)` per candidate, then `sel.Hits()`. `rank.Select(hits, k)` does the same for a slice.
+2. Fuse ranked legs: `rank.RRF(k, legs...)`, or `rank.Fusion{RankConstant: c, Weights: w}.RRF(k, legs...)` after `Validate(len(legs))`.
+3. Late interaction: `ivfq.LateInteractionScore(metric, queryTokens, docTokens)` sums, over query tokens, the best document-token score. Check inputs with `ValidateLateInteraction` first.
 
 ## Tune recall
 
