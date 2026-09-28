@@ -15,7 +15,6 @@ clusters, the codes and the scan.
 | `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass |
 | `rabitq` | 1-bit RaBitQ codes: `Quantize`, `Quantizer`, `Scorer`, `Rotation` |
 | `rank` | top-k selection and reciprocal rank fusion |
-| `recall` | a controller that holds an index at a recall target |
 | `late` | late-interaction scoring of multi-vector documents |
 | `sparse` | the string-keyed sparse vector |
 | `codec` | f16 and int8 row storage |
@@ -63,27 +62,6 @@ per-cluster counts and radii. No rule ever touches every row.
 1. Select the top k as you score: `sel := rank.NewTopK(k)`, `sel.Push(id, score)` per candidate, then `sel.Hits()`. `rank.Select(hits, k)` does the same for a slice.
 2. Fuse ranked legs: `rank.RRF(k, legs...)`, or `rank.Fusion{RankConstant: c, Weights: w}.RRF(k, legs...)` after `Validate(len(legs))`.
 3. Late interaction: `late.Score(metric, queryTokens, docTokens)` sums, over query tokens, the best document-token score. Check inputs with `late.Validate` first.
-
-## Tune recall
-
-`recall` holds an index at a recall@k target by moving two knobs from a
-sample of live queries.
-
-1. Build one controller: `c := recall.New(recall.Config{})` (target 0.95, 1 in 100 queries, 30 s between measurements).
-2. Run each query at `c.Tuned(recall.Key{Index: name, Field: field})`.
-3. After it, if `c.Offer(name)` and `c.Due(name)`, call `c.Measure(ctx, key, src)`, in the background if you like.
-
-| knob | range | order |
-| --- | --- | --- |
-| `Knobs.Probes` | `MinProbes` (16) to 2 × `DefaultNprobe` | spent first, bought back second |
-| `Knobs.Depth`, clusters the bound-pruned rerank reads | `None`, 8, 16, 32, 64, `Unbounded` | bought back first, spent second |
-
-`src` is a `recall.Source`: `Clusters()` (count, and how many are cached),
-`Search(ctx, knobs)` (top-k ids, and whether it answered exactly anyway),
-`Exact(ctx)` (the true top-k ids), `Reranked()` (rows read since the last
-call). Probes never drop below 16, a move that costs more than 0.02 recall
-is undone and pinned as a floor, and under 99% of clusters cached `Measure`
-returns `ErrCold`. No I/O, no goroutines; `Set` restores state.
 
 ## Benchmark data
 

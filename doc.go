@@ -8,8 +8,8 @@
 //
 // The other halves are subpackages: kmeans fits the centroids, rabitq
 // gives every cluster a 1-bit candidate column with a scorer and an error
-// bound, rank selects and fuses hits, recall tunes probe counts against a
-// target, late scores multi-vector documents, sparse is the string-keyed
-// sparse vector, codec stores rows at f16 and int8, and bench reads the
-// standard ANN corpora. No I/O anywhere but bench.
+// bound, rank selects and fuses hits, late scores multi-vector documents,
+// sparse is the string-keyed sparse vector, codec stores rows at f16 and
+// int8, and bench reads the standard ANN corpora. No I/O anywhere but
+// bench.
 package ivfq
