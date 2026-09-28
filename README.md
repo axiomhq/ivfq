@@ -34,15 +34,18 @@ radii.
 | area | names |
 | --- | --- |
 | clustering | `RunSampled`, `RunSampledSpherical`, `RunSampledBudget`, `SampleSize`, `Split`, `SplitSpherical`, `SplitAbove`, `MergeBelow` |
-| centroid tree | `Build`, `Tree`, `Tree.Nearest`, `Tree.Upsert`, `MarshalBinary`, `UnmarshalTree` |
+| centroid tree | `Build`, `Tree`, `Tree.Nearest`, `Tree.Upsert`, `Tree.UpsertAll`, `Tree.ApplyCentroidDeltas`, `MarshalBinary`, `UnmarshalTree` |
+| centroid codec | `EncodeCentroids`, `DecodeCentroids`, `CentroidUpsert`, `CentroidDelta`, `EncodeCentroidDelta`, `DecodeCentroidDelta`, `ApplyCentroidDeltas`, `ErrCorrupt` |
+| cluster geometry | `Centroid`, `MeanDistance`, `MergeTarget`, `MergeOwed` |
 | sizing | `HoodK`, `DefaultNprobe`, `Policy`, `DefaultPolicy` |
 | quantizer | `Quantize`, `Quantizer`, `Code`, `Query`, `Scorer`, `Scorer.ScoreAndBound`, `Rotation` |
 | codecs | `AppendF16`, `DecodeF16Into` (round to nearest even), `AppendI8`, `DecodeI8Into` (half away from zero, saturating) |
 | kernels | `Dot`, `L2Sq`, `CosineSim`, `Score`, `Dots` |
 | scoring | `LateInteractionScore`, `ValidateLateInteraction` |
-| types | `Vector[T]`, `Rows[T]`, `Sparse[T]`, `Metric` (`L2`, `Cosine`, `InnerProduct`) |
+| types | `Vector[T]`, `Rows[T]`, `Sparse[T]`, `SparseVector`, `SparseDot`, `Metric` (`L2`, `Cosine`, `InnerProduct`) |
 | recall tuning (`recall`) | `New`, `Controller`, `Offer`, `Due`, `Measure`, `Tuned`, `Set`, `Source`, `Knobs`, `Depth`, `Overlap` |
 | rank (`rank`) | `Hit`, `TopK`, `Select`, `Fusion`, `RRF` |
+| bench (`bench`) | `ReadFvecs`, `ReadIvecs`, `OpenBin`, `BinReader`, `ReadGroundTruth`, `U8ToI8`, `Blobs`, `RecallAtK`, `Percentile`, `Summary`, `StartMemPeak`, `RSSBytes`, `CPUSeconds`, `ProfileTo` |
 
 ## Rank
 
@@ -51,6 +54,15 @@ radii.
 1. Select the top k as you score: `sel := rank.NewTopK(k)`, `sel.Push(id, score)` per candidate, then `sel.Hits()`. `rank.Select(hits, k)` does the same for a slice.
 2. Fuse ranked legs: `rank.RRF(k, legs...)`, or `rank.Fusion{RankConstant: c, Weights: w}.RRF(k, legs...)` after `Validate(len(legs))`.
 3. Late interaction: `ivfq.LateInteractionScore(metric, queryTokens, docTokens)` sums, over query tokens, the best document-token score. Check inputs with `ValidateLateInteraction` first.
+
+## Benchmark data
+
+`github.com/axiomhq/ivfq/bench` reads the standard ANN corpora and measures a run. Stdlib only.
+
+1. Read a corpus: `bench.ReadFvecs(path)` for texmex `.fvecs`, or `b, err := bench.OpenBin(path)` then `b.Next(n)` in batches for Big ANN `.u8bin`/`.fbin`.
+2. Read the ground truth: `bench.ReadIvecs(path)` for `.ivecs`, `bench.ReadGroundTruth(path)` for `.ibin`.
+3. Score: `bench.RecallAtK(got, truth, 10)`.
+4. Measure: `bench.Summary("query", latencies)` prints p50/p95/p99/mean; `m := bench.StartMemPeak()` ... `m.Close()` keeps peak `Sys`, `Heap` and `RSS`.
 
 ## Tune recall
 

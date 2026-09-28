@@ -12,7 +12,8 @@ type Vector[T Number] []T
 // Rows is a late-interaction matrix: one Vector per token.
 type Rows[T Number] []Vector[T]
 
-// Sparse is a coordinate-sparse vector. Index is sorted and unique.
+// Sparse is a coordinate-sparse vector. Index is sorted and unique. This is
+// the int-indexed form; SparseVector is the string-keyed one.
 type Sparse[T Number] struct {
 	Index []uint32
 	Value []T

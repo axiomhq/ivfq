@@ -8,6 +8,8 @@
 // Sparse, Rotation, Quantizer, the 1-bit RaBitQ Code and its Scorer, and the
 // SIMD kernels under them (Dot, L2Sq, CosineSim, Dots, the bit products).
 // LateInteractionScore scores multi-vector documents token by token; package
-// rank selects and fuses the results.
+// rank selects and fuses the results. Centroid sets and their slot deltas
+// have a binary codec (EncodeCentroids, EncodeCentroidDelta), and
+// SparseVector is the string-keyed sparse vector beside Sparse[T].
 // No I/O.
 package ivfq
