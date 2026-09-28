@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 )
@@ -162,7 +163,10 @@ func (b *Code) word(i int) uint64 {
 // metric decides whether the rows are normalized first; seed is the
 // rotation. An empty corpus still produces a valid, zero-row payload,
 // because a hood may legitimately hold only tombstones.
-func quantizeBits(vectors [][]float32, dims int, metric string, seed uint64) (Quantizer, error) {
+func quantizeBits(vectors [][]float32, dims int, metric ivfq.Metric, seed uint64) (Quantizer, error) {
+	if metric != ivfq.L2 && metric != ivfq.Cosine {
+		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", metric)
+	}
 	if dims <= 0 {
 		return Quantizer{}, fmt.Errorf("quant: 1-bit codes need a positive width, got %d", dims)
 	}
@@ -174,7 +178,7 @@ func quantizeBits(vectors [][]float32, dims int, metric string, seed uint64) (Qu
 			return Quantizer{}, fmt.Errorf("quant: row %d is %d-wide, the field is %d", i, len(v), dims)
 		}
 	}
-	unit := metric == "cosine"
+	unit := metric == ivfq.Cosine
 	rows := len(vectors)
 	b := &Code{
 		Words:    make([]uint64, rows*bitWords(dims)),
@@ -548,7 +552,7 @@ func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 	d := c.Dims
 	s := &bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
 		freeD: math.Max(float64(d-1), 1), sigmas: boundSigmas, exact: q.Exact,
-		l2: q.Metric == "l2"}
+		l2: q.Metric == ivfq.L2}
 	if q.Sigmas > 0 {
 		s.sigmas = q.Sigmas
 	}
@@ -560,7 +564,7 @@ func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 	// a case). Each one scores nothing and, crucially, BOUNDS nothing: the
 	// bound pass then reads every row and the answer is still right, just
 	// slow. A bound of zero here would silently prune the whole index.
-	if (!s.l2 && q.Metric != "cosine") || len(q.Vector) < d || b.Unit != (q.Metric == "cosine") {
+	if (!s.l2 && q.Metric != ivfq.Cosine) || len(q.Vector) < d || b.Unit != (q.Metric == ivfq.Cosine) {
 		s.dead, s.exact = true, true
 		return s
 	}

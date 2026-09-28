@@ -1,13 +1,16 @@
 package rabitq
 
-import "testing"
+import (
+	"github.com/axiomhq/ivfq"
+	"testing"
+)
 
 // A scorer rebound to another column in the same frame (Scorer.With, the
 // tier's per-cluster binding) scores that column's rows exactly as a
 // scorer bound to it directly, whichever representation either column has
 // and however many rows it holds.
 func TestReboundScorerReadsTheNewColumn(t *testing.T) {
-	for _, metric := range []string{"l2", "cosine"} {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		opts := Options{Dims: 129, Metric: metric, Seed: 11}
 		centroid := corpus(1, 129)[0]
 		small, err := Empty(centroid, opts)

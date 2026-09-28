@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func bitOpts(metric string) Options {
+func bitOpts(metric ivfq.Metric) Options {
 	return Options{Metric: metric, Seed: Seed("ns", "vector")}
 }
 
@@ -23,7 +23,7 @@ func mustEncode(t *testing.T, vectors [][]float32, opts Options) Quantizer {
 }
 
 func TestBitCodesBinaryRoundTrip(t *testing.T) {
-	for _, metric := range []string{"l2", "cosine"} {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(64, 33) // 33 dims: the last word is mostly padding
 		vectors[7] = make([]float32, 33)
 		want := mustEncode(t, vectors, bitOpts(metric))
@@ -54,7 +54,7 @@ func TestBitCodesBinaryRoundTrip(t *testing.T) {
 }
 
 func TestBorrowedBitCodesMatchOwned(t *testing.T) {
-	for _, metric := range []string{"l2", "cosine"} {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(64, 129)
 		data, err := mustEncode(t, vectors, bitOpts(metric)).MarshalBinary()
 		if err != nil {
@@ -90,7 +90,7 @@ func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 // full vector is read, so bits the encoder could never write must not decode.
 func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 	vectors := corpus(4, 64)
-	b, err := mustEncode(t, vectors, bitOpts("l2")).MarshalBinary()
+	b, err := mustEncode(t, vectors, bitOpts(ivfq.L2)).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 	}
 	// 64 dims is a full word, so there is no padding to corrupt; check the
 	// padding rule where there IS padding.
-	pb, err := mustEncode(t, corpus(4, 33), bitOpts("l2")).MarshalBinary()
+	pb, err := mustEncode(t, corpus(4, 33), bitOpts(ivfq.L2)).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 // whether the mean of those is inside the standard error of their own
 // spread. Anything else would call sampling noise a bias.
 func TestBitEstimatorIsUnbiased(t *testing.T) {
-	for _, metric := range []string{"l2", "cosine"} {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(2000, 128)
 		queries := corpus(60, 128)
 		codes := mustEncode(t, vectors, bitOpts(metric))
@@ -218,7 +218,7 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 		{"clustered", clusteredCorpus(3000, 16, 128), clusteredCorpus(40, 16, 128)},
 		{"axis-aligned", axis(3000, 128), axis(40, 128)},
 	} {
-		for _, metric := range []string{"l2", "cosine"} {
+		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 			codes := mustEncode(t, tc.v, bitOpts(metric))
 			// Two settings of eps0 two orders of magnitude of tail apart:
 			// the shipped one, and a loose one where a miscalibrated bound
@@ -261,8 +261,8 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 // survives, so a bound-pruned pass over them is exact again.
 func TestBitExactQueryBoundsNothing(t *testing.T) {
 	vectors := corpus(200, 64)
-	codes := mustEncode(t, vectors, Options{Metric: "l2", Seed: 3})
-	s := codes.Scorer(Query{Vector: vectors[0], Metric: "l2", Exact: true})
+	codes := mustEncode(t, vectors, Options{Metric: ivfq.L2, Seed: 3})
+	s := codes.Scorer(Query{Vector: vectors[0], Metric: ivfq.L2, Exact: true})
 	for row := range vectors {
 		if _, bound := s.ScoreAndBound(row); !math.IsInf(float64(bound), 1) {
 			t.Fatalf("row %d bound %v under Exact", row, bound)
@@ -281,7 +281,7 @@ func TestBitExactQueryBoundsNothing(t *testing.T) {
 // a crowd of near-ties and the error band covers a large share of them. Real
 // corpora are not like this; SIFT1M behaves far better.
 func TestBitTwoPassRecallAndRows(t *testing.T) {
-	for _, metric := range []string{"l2", "cosine"} {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors, queries := corpus(3000, 128), corpus(20, 128)
 		for i := range queries {
 			for d := range queries[i] {
@@ -328,12 +328,12 @@ func TestBitTwoPassRecallAndRows(t *testing.T) {
 func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 	vectors := corpus(8, 16)
 	vectors[3] = make([]float32, 16)
-	codes := mustEncode(t, vectors, bitOpts("cosine"))
-	s := codes.Scorer(NewQuery(vectors[0], "cosine"))
+	codes := mustEncode(t, vectors, bitOpts(ivfq.Cosine))
+	s := codes.Scorer(NewQuery(vectors[0], ivfq.Cosine))
 	if score, bound := s.ScoreAndBound(3); score != 0 || bound != 0 {
 		t.Fatalf("zero row scored %v bound %v", score, bound)
 	}
-	zero := codes.Scorer(NewQuery(make([]float32, 16), "cosine"))
+	zero := codes.Scorer(NewQuery(make([]float32, 16), ivfq.Cosine))
 	for row := range vectors {
 		if score, _ := zero.ScoreAndBound(row); score != 0 {
 			t.Fatalf("zero query scored row %d at %v", row, score)
@@ -346,13 +346,13 @@ func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 // zero would silently drop the whole index instead.
 func TestBitScorerBoundsNothingWhenItCannotScore(t *testing.T) {
 	vectors := corpus(16, 32)
-	l2 := mustEncode(t, vectors, bitOpts("l2"))
-	cosine := mustEncode(t, vectors, bitOpts("cosine"))
+	l2 := mustEncode(t, vectors, bitOpts(ivfq.L2))
+	cosine := mustEncode(t, vectors, bitOpts(ivfq.Cosine))
 	for name, s := range map[string]Scorer{
-		"unknown metric":     l2.Scorer(NewQuery(vectors[0], "hamming")),
-		"short query":        l2.Scorer(NewQuery(vectors[0][:8], "l2")),
-		"cosine query on l2": l2.Scorer(NewQuery(vectors[0], "cosine")),
-		"l2 query on cosine": cosine.Scorer(NewQuery(vectors[0], "l2")),
+		"unsupported metric": l2.Scorer(NewQuery(vectors[0], ivfq.InnerProduct)),
+		"short query":        l2.Scorer(NewQuery(vectors[0][:8], ivfq.L2)),
+		"cosine query on l2": l2.Scorer(NewQuery(vectors[0], ivfq.Cosine)),
+		"l2 query on cosine": cosine.Scorer(NewQuery(vectors[0], ivfq.L2)),
 	} {
 		score, bound := s.ScoreAndBound(3)
 		if score != 0 || !math.IsInf(float64(bound), 1) {
@@ -361,7 +361,7 @@ func TestBitScorerBoundsNothingWhenItCannotScore(t *testing.T) {
 	}
 	// A zero cosine query is different: every score really IS 0, so 0 is a
 	// sound bound and the rerank can skip on it.
-	zero := cosine.Scorer(NewQuery(make([]float32, 32), "cosine"))
+	zero := cosine.Scorer(NewQuery(make([]float32, 32), ivfq.Cosine))
 	if score, bound := zero.ScoreAndBound(3); score != 0 || bound != 0 {
 		t.Fatalf("zero cosine query: scored %v bound %v, want 0 and 0", score, bound)
 	}
@@ -417,12 +417,12 @@ func TestRotationIsReproducibleAndOrthogonal(t *testing.T) {
 func BenchmarkBitScore(b *testing.B) {
 	v := corpus(10000, 128)
 	q := v[0]
-	c, err := Quantize(v, Options{Metric: "l2", Seed: 11})
+	c, err := Quantize(v, Options{Metric: ivfq.L2, Seed: 11})
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Run("1bit", func(b *testing.B) {
-		pq := NewQuery(q, "l2")
+		pq := NewQuery(q, ivfq.L2)
 		for b.Loop() {
 			s := c.Scorer(pq)
 			for i := range v {

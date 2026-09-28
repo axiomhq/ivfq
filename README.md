@@ -21,7 +21,7 @@ clusters, the codes and the scan.
 ## Query
 
 1. Probe the nearest clusters: `tree.Nearest(query, ivfq.DefaultNprobe(k))`.
-2. Score every probed row on its codes: `s := q.Scorer(ivfq.NewQuery(query, "l2"))`; `s.ScoreAndBound(row)` returns an estimate and a bound.
+2. Score every probed row on its codes: `s := q.Scorer(rabitq.NewQuery(query, ivfq.L2))`; `s.ScoreAndBound(row)` returns an estimate and a bound.
 3. Rerank the shortlist on the raw vectors with `ivfq.Score(metric, query, row)`.
 
 Splits and merges keep the clusters at their size as rows arrive:

@@ -29,7 +29,7 @@ func Validate(tokens [][]float32, dims int) error {
 // Score sums each query token's best document-token score.
 // Inputs must be validated nonempty matrices of the same width. In particular,
 // a negative best match contributes its negative score, not zero.
-func Score(metric string, query, document [][]float32) float32 {
+func Score(metric ivfq.Metric, query, document [][]float32) float32 {
 	var sum float32
 	for _, q := range query {
 		best := float32(math.Inf(-1))

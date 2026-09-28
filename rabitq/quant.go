@@ -2,6 +2,7 @@ package rabitq
 
 import (
 	"fmt"
+	"github.com/axiomhq/ivfq"
 	"math"
 )
 
@@ -36,7 +37,7 @@ func (c Quantizer) Retained() int { return c.Code.retained() }
 // hoods encode unit vectors), and the rotation seed.
 type Options struct {
 	Dims   int
-	Metric string
+	Metric ivfq.Metric
 	Seed   uint64
 }
 
@@ -61,7 +62,10 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 	if opts.Seed == 0 {
 		return Quantizer{}, fmt.Errorf("quant: 1-bit codes need a nonzero rotation seed")
 	}
-	unit := opts.Metric == "cosine"
+	if opts.Metric != ivfq.L2 && opts.Metric != ivfq.Cosine {
+		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", opts.Metric)
+	}
+	unit := opts.Metric == ivfq.Cosine
 	c := append([]float32(nil), centroid...)
 	if unit {
 		c = workRow(c, true)
@@ -208,7 +212,7 @@ func UnmarshalBinaryBorrowed(data []byte) (Quantizer, error) {
 // computed once here rather than per candidate.
 type Query struct {
 	Vector []float32
-	Metric string
+	Metric ivfq.Metric
 	// Exact drops the bound: every row's bound is +Inf, so the bound-pruned
 	// pass reads every row and the answer is exactly the top k over the
 	// probed hoods. It is how a caller buys back the certainty the 1-bit
@@ -221,9 +225,9 @@ type Query struct {
 	invNorm float64 // 0 for a zero cosine query, which scores 0 everywhere
 }
 
-func NewQuery(q []float32, metric string) Query {
+func NewQuery(q []float32, metric ivfq.Metric) Query {
 	out := Query{Vector: q, Metric: metric}
-	if metric == "cosine" {
+	if metric == ivfq.Cosine {
 		var qn float64
 		for _, x := range q {
 			qn += float64(x) * float64(x)

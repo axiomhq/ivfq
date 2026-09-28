@@ -1,6 +1,7 @@
 package rabitq
 
 import (
+	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"math/rand/v2"
@@ -14,7 +15,7 @@ import (
 func TestFillRowsMatchesFillRow(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 9))
 	for _, dims := range []int{1, 2, 3, 16, 100, 128, 129} {
-		for _, metric := range []string{"l2", "cosine"} {
+		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 			for _, rows := range []int{0, 1, simd.FillBlock - 1, simd.FillBlock, 3*simd.FillBlock + 5} {
 				vectors := make([][]float32, rows)
 				for i := range vectors {
@@ -46,7 +47,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 				rot := rotationFor(11, dims)
 				scratch := make([]float32, dims)
 				for i, v := range vectors {
-					row := workRow(v, metric == "cosine")
+					row := workRow(v, metric == ivfq.Cosine)
 					if row == nil {
 						continue
 					}
@@ -60,7 +61,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 		}
 	}
 	// A hood of one row: the row is its own centroid, zero norm, no bits.
-	q, err := quantizeBits([][]float32{{1, 2, 3}}, 3, "l2", 5)
+	q, err := quantizeBits([][]float32{{1, 2, 3}}, 3, ivfq.L2, 5)
 	if err != nil || q.Code.Norms[0] != 0 || q.Code.Aligns[0] != 0 || q.Code.Words[0] != 0 {
 		t.Fatalf("single row: %+v %v", q.Code, err)
 	}
