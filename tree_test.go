@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/axiomhq/ivfq/kmeans"
 	"math"
 	"math/rand"
 	"reflect"
@@ -49,7 +50,7 @@ func TestTreeOracleAndEncoding(t *testing.T) {
 	tree := mustBuild(v, 16)
 	q := append([]float32(nil), v[1234]...)
 	got, n := tree.Evaluations(q, 16)
-	if !contains(got, Nearest(v, q)) {
+	if !contains(got, kmeans.Nearest(v, q)) {
 		t.Fatalf("flat nearest absent: %v", got)
 	}
 	if n > tree.Height()*16*16+16*16 {
@@ -225,7 +226,7 @@ func TestTreeRecall(t *testing.T) {
 		hits := 0
 		for i := 0; i < 100; i++ {
 			q := v[r.Intn(len(v))]
-			if contains(tree.Nearest(q, p), Nearest(v, q)) {
+			if contains(tree.Nearest(q, p), kmeans.Nearest(v, q)) {
 				hits++
 			}
 		}
@@ -257,7 +258,7 @@ func TestTreeTwoStage(t *testing.T) {
 		assign := tree.TwoStageAssigner(fan)
 		for i := 0; i < 200; i++ {
 			q := v[i]
-			want := Nearest(v, q)
+			want := kmeans.Nearest(v, q)
 			if got := assign(q); got != want {
 				t.Fatalf("top=%d: row %d: two-stage %d, flat %d", fan, i, got, want)
 			}
@@ -279,8 +280,8 @@ func TestTreeTwoStage(t *testing.T) {
 	}
 	// A single-holder tree has no fan: the two-stage scan is the flat scan.
 	small := mustBuild(v[:30], 32)
-	if got := small.TwoStageAssigner(4)(v[0]); got != Nearest(v[:30], v[0]) {
-		t.Fatalf("single holder: two-stage %d, flat %d", got, Nearest(v[:30], v[0]))
+	if got := small.TwoStageAssigner(4)(v[0]); got != kmeans.Nearest(v[:30], v[0]) {
+		t.Fatalf("single holder: two-stage %d, flat %d", got, kmeans.Nearest(v[:30], v[0]))
 	}
 }
 
@@ -425,7 +426,7 @@ func BenchmarkTreeNearest(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("flat/%d", n), func(b *testing.B) {
 			for b.Loop() {
-				_ = Nearest(v, q)
+				_ = kmeans.Nearest(v, q)
 			}
 		})
 	}
@@ -507,7 +508,7 @@ func TestTreeAssignerAgreesWithFlatOnByteVectors(t *testing.T) {
 	assign := tree.Assigner(16)
 	agree := 0
 	for _, q := range queries {
-		want := Nearest(centroids, q)
+		want := kmeans.Nearest(centroids, q)
 		if got := assign(q); got == want {
 			agree++
 		}
@@ -580,7 +581,7 @@ func TestTreeUpsertReplaceAndAppend(t *testing.T) {
 	assign := tree.Assigner(16)
 	misses := 0
 	for _, q := range treeRandScaled(500, d, 101, spacing, noise) {
-		got, want := assign(q), Nearest(cur, q)
+		got, want := assign(q), kmeans.Nearest(cur, q)
 		if got != want && L2Sq(q, cur[got]) > L2Sq(q, cur[want])*1.02 {
 			misses++
 		}

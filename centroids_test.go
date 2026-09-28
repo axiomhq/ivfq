@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/axiomhq/ivfq/kmeans"
 	"math/rand"
 	"reflect"
 	"slices"
@@ -200,7 +201,7 @@ func treeAssigner(tree *Tree, centroids [][]float32) func([]float32) int {
 		if id := assign(v); id >= 0 {
 			return id
 		}
-		return Nearest(centroids, v)
+		return kmeans.Nearest(centroids, v)
 	}
 }
 

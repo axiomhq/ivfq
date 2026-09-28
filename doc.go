@@ -1,15 +1,15 @@
-// Package ivfq is inverted-file clustering plus quantization: the two halves
-// of an IVF index in the FAISS sense ("IVF + quantizer").
+// Package ivfq is the clustering half of an IVF index in the FAISS sense
+// ("IVF + quantizer"): the sizing rule that keeps clusters at about
+// HoodTarget vectors, the centroid Tree a query probes, the split and merge
+// rules that hold cluster sizes between rebuilds, the Policy that names the
+// next cluster to split, and a binary codec for centroid sets and their
+// deltas. It also holds the distance vocabulary every subpackage shares:
+// Metric, Score, Dot, L2Sq and CosineSim.
 //
-// The clustering half partitions vectors into hoods: k-means (plain,
-// spherical, and sample-trained), the centroid Tree and its Nearest lookup,
-// splits and merges, and the rebalancing Policy. The quantization half gives
-// every hood a candidate column and an exact rerank: Vector[T], Rows,
-// Sparse, Rotation, Quantizer, the 1-bit RaBitQ Code and its Scorer, and the
-// SIMD kernels under them (Dot, L2Sq, CosineSim, Dots, the bit products).
-// LateInteractionScore scores multi-vector documents token by token; package
-// rank selects and fuses the results. Centroid sets and their slot deltas
-// have a binary codec (EncodeCentroids, EncodeCentroidDelta), and
-// SparseVector is the string-keyed sparse vector beside Sparse[T].
-// No I/O.
+// The other halves are subpackages: kmeans fits the centroids, rabitq
+// gives every cluster a 1-bit candidate column with a scorer and an error
+// bound, rank selects and fuses hits, recall tunes probe counts against a
+// target, late scores multi-vector documents, sparse is the string-keyed
+// sparse vector, codec stores rows at f16 and int8, and bench reads the
+// standard ANN corpora. No I/O anywhere but bench.
 package ivfq

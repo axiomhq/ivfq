@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/axiomhq/ivfq/kmeans"
 	"io"
 	"io/fs"
 	"math/rand"
@@ -289,7 +290,7 @@ func loadBeamTrain(b *testing.B, k int, sample bool) *beamTrain {
 	}
 
 	b.Logf("k=%d: training %d rows, measuring %d held-out rows, dims %d", k, len(train), len(queries), s.dims)
-	centroids, _, err := RunSampledBudget(context.Background(), train, k, beamIters, beamSeed, 0)
+	centroids, _, err := kmeans.RunSampledBudget(context.Background(), train, k, beamIters, beamSeed, 0)
 	if err != nil {
 		b.Fatal(err)
 	}

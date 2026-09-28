@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/axiomhq/ivfq/kmeans"
 	"math"
 	"sync"
 )
@@ -144,7 +145,7 @@ func (t *Tree) build(ctx context.Context, ids []int, depth int) (int, int, error
 		vs[i] = t.leaves[id]
 	}
 	k := min(t.fanout, (len(ids)+t.fanout-1)/t.fanout)
-	_, assign, err := RunSampled(ctx, vs, k, 6, int64(0x51f15e+depth))
+	_, assign, err := kmeans.RunSampled(ctx, vs, k, 6, int64(0x51f15e+depth))
 	if err != nil {
 		return 0, 0, err
 	}
