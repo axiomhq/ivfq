@@ -2,7 +2,7 @@ package simd
 
 import "golang.org/x/sys/cpu"
 
-// DecodeI8 is DecodeI8Into's loop; eight lanes at a time with AVX2.
+// DecodeI8 widens each byte of b to float32 in dst; eight lanes at a time with AVX2.
 func DecodeI8(dst []float32, b []byte) {
 	i := 0
 	if cpu.X86.HasAVX2 && len(dst) >= 8 {
@@ -14,7 +14,7 @@ func DecodeI8(dst []float32, b []byte) {
 	}
 }
 
-// AppendI8 is AppendI8's loop. The vector kernel takes the leading run of
+// AppendI8 appends each value of v rounded to int8. The vector kernel takes the leading run of
 // eight-lane groups that are all integers — every row of an i8 column,
 // which a rewrite re-encodes — where rounding is the identity and
 // clamping is int8 saturation; RoundI8 takes the rest.

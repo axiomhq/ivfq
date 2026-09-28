@@ -7,30 +7,22 @@ import (
 	"math"
 )
 
-// Codes is one hood's candidate column: the bytes the probe wave moves and
-// the kernel scores. There is ONE codec — RaBitQ 1-bit residuals
-// (rabitq.go), dims BITS plus 8 bytes per row, with a bound that holds at
-// boundConfidence — and this type is the seam the engine sees.
-//
-// Until 2026-09-15 there were two, selected by Config.CandidateCodes, and a
-// hood's payload said which one it held so mixed generations read. The
-// per-vector symmetric int8 codec (DQC2) is gone: it cost dims BYTES plus 16
-// a row against 1-bit's dims bits plus 8, which on SIFT1M was 105.3 stored
-// bytes a row against 27.8, and the one thing it bought — a bound that
-// cannot be exceeded — is bought back where it is actually wanted by
-// Query.Exact.
+// Quantizer is one cluster's candidate column: one Code row per vector,
+// dims bits plus 8 bytes each, encoded against the cluster's own centroid
+// in the frame of one Rotation. Its bound is probabilistic (boundSigmas);
+// Query.Exact trades it for certainty.
 type Quantizer struct {
 	Dims int
 	// Code is the payload. Non-nil for anything UnmarshalBinary returned.
 	Code *Code
 }
 
-// Count is how many code rows this column holds — one per vector the
-// manifest counted, which is what CheckParts holds it to.
+// Rows is how many code rows the column holds, one per vector.
 func (c Quantizer) Rows() int { return c.Code.Rows() }
 
-// Retained is what a decoded column holds in memory, for the byte cache's
-// accounting.
+// Retained is the bytes the column holds in memory of its own: zero for a
+// column UnmarshalBinaryBorrowed aliased onto its input, the payload's size
+// otherwise.
 func (c Quantizer) Retained() int { return c.Code.retained() }
 
 // Options is what Quantize needs beyond the vectors: the metric (cosine
@@ -80,12 +72,11 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 // Every per-row scalar and bit is copied verbatim, so a copied row decodes,
 // scores and bounds exactly as it did in the source column.
 //
-// This is the read-and-reassemble half of copying codes between packs: a
-// split writes each half's rows out of the source hood's column instead of
-// quantizing them again. A column is
-// self-consistent around the ONE centroid its rows are residuals to, so
-// rows may only be combined with rows of a column carrying that same
-// centroid — that is what AppendRows is for.
+// It is how a split writes each half's rows out of the source column
+// instead of quantizing them again. A column is self-consistent around the
+// ONE centroid its rows are residuals to, so rows may only be combined with
+// rows of a column carrying that same centroid; AppendRows encodes new rows
+// into it.
 func (c Quantizer) Select(rows []int) (Quantizer, error) {
 	b := c.Code
 	if b == nil {
@@ -128,10 +119,9 @@ func (c Quantizer) Select(rows []int) (Quantizer, error) {
 // seed and metric frame. The zero-vector rule carries over: a zero vector
 // appended to a cosine column becomes a zeroRowAlign row.
 //
-// It is the other half of copying codes between packs: the few rows that
-// move INTO a split's new hood from a neighbouring one are re-encoded
-// against the copied column's centroid, so the whole column stays one
-// frame without re-quantizing the rows that were copied verbatim.
+// It is how rows that join a column from elsewhere are encoded against
+// this column's centroid, so the whole column stays one frame without
+// re-quantizing the rows Select copied verbatim.
 func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, error) {
 	b := c.Code
 	if b == nil {
@@ -222,12 +212,11 @@ type Query struct {
 	Rotation *Rotation
 	// Exact drops the bound: every row's bound is +Inf, so the bound-pruned
 	// pass reads every row and the answer is exactly the top k over the
-	// probed hoods. It is how a caller buys back the certainty the 1-bit
-	// codec's probabilistic bound trades away.
+	// probed clusters. It is how a caller buys back the certainty the
+	// probabilistic bound trades away.
 	Exact bool
-	// Sigmas overrides boundSigmas for the 1-bit codec (0 = the default).
-	// Tests measure coverage against it; the query path sets it from
-	// search.Config.BoundSigmas, which the bound-width sweep varies.
+	// Sigmas is the bound's width in standard deviations of the estimator's
+	// error; 0 is the default, boundSigmas.
 	Sigmas  float64
 	invNorm float64 // 0 for a zero cosine query, which scores 0 everywhere
 }
@@ -262,10 +251,9 @@ func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q
 
 // Rebind is Scorer for a column in the same frame as the one s was built
 // on (same centroid, rotation and metric): the query-side work is reused
-// and only the rows change. A cluster of the LSM tier is many 64-row
-// blocks encoded against one centroid, so a probe binds the query once per
-// cluster rather than once per block. A column in another frame is bound
-// afresh.
+// and only the rows change: a cluster stored as many blocks encoded against
+// one centroid binds the query once per cluster rather than once per
+// block. A column in another frame is bound afresh.
 func (s Scorer) Rebind(c *Quantizer, q Query) Scorer {
 	if s.bit != nil && s.bit.b.sameFrame(c.Code) {
 		return s.With(c)
@@ -274,7 +262,7 @@ func (s Scorer) Rebind(c *Quantizer, q Query) Scorer {
 }
 
 // With is Rebind without the frame check, for a caller that has verified
-// the columns share one frame (tier.ClusterView.SameFrame).
+// the columns share one frame (SameFrame).
 func (s Scorer) With(c *Quantizer) Scorer {
 	bit := *s.bit
 	bit.b = c.Code

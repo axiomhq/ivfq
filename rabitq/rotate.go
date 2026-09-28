@@ -14,15 +14,15 @@ import (
 // handful of distinct codes and the estimator's variance is whatever the
 // corpus says it is, not O(1/sqrt(D)).
 //
-// A materialized D x D matrix is out of the question at the dimensions this
-// engine serves: building one is O(D^3) (3.6 GFLOP at 1536 dims), storing it
-// is 9 MB, and applying it to every row of every hood at build time is
-// D^2 per vector. So the rotation is a BUTTERFLY of Givens rotations: a few
+// A materialized D x D matrix is out of the question at embedding widths:
+// building one is O(D^3) (3.6 GFLOP at 1536 dims), storing it is 9 MB, and
+// applying it to every row of every cluster at build time is D^2 per
+// vector. So the rotation is a BUTTERFLY of Givens rotations: a few
 // rounds, each one a random pairing of all D coordinates and a random angle
 // per pair. Every factor is exactly orthogonal, so the product is exactly
 // orthogonal at any D (no power-of-two padding, no code bits spent on a pad),
-// it costs O(D log D) to apply, and it is reproducible from a seed — the pack
-// stores the seed, not the matrix.
+// it costs O(D log D) to apply, and it is reproducible from a seed: a
+// column stores the seed, not the matrix.
 //
 // rounds is 3 + ceil(log2(D)): each round mixes disjoint pairs, so after
 // log2(D) rounds of random pairings every coordinate has had a path to every
@@ -102,13 +102,12 @@ func (r *Rotation) applyBlock(block []float32) {
 	}
 }
 
-// Seed is the rotation seed a namespace's field uses: FNV-1a over the
-// namespace and field names. Deriving it rather than drawing it keeps every
-// hood of a field in ONE frame, so a query rotates once per hood and the
-// cache above holds one entry — while two different fields, and two
-// different namespaces, still get independent rotations. The value is
-// written into every codes part anyway, so a reader never re-derives it and
-// changing this function cannot strand existing packs.
+// Seed derives a rotation seed from names: FNV-1a over parts joined by
+// '/', an index and field name say. Deriving it rather than drawing it
+// keeps every column of a field in ONE frame, so one Rotation serves them
+// all, while two different fields still get independent rotations. The
+// value is written into every column anyway, so a reader never re-derives
+// it and changing this function cannot strand existing columns.
 func Seed(parts ...string) uint64 {
 	const offset, prime = 14695981039346656037, 1099511628211
 	h := uint64(offset)

@@ -22,9 +22,8 @@ import (
 // plus two float32 scalars: ||o - c||, and <x_b, x> (how well the sign
 // pattern points at the residual; call it the row's ALIGNMENT). At 128 dims
 // that is 16 + 8 = 24 bytes against the 512 bytes of the f32 vector, 21x,
-// and against int8's 128 + 16 = 144 bytes, 6x. The probe wave moves that
-// factor fewer bytes, which is the whole point: a probed hood is one ranged
-// read and this is how big that read is.
+// and against int8's 128 + 16 = 144 bytes, 6x. A probed cluster is one
+// read of its column, and this is how big that read is.
 //
 // The query side rotates and normalizes ITS residual to the same centroid,
 // quantizes it to 4 bits per dimension (the paper's B_q), and estimates
@@ -64,37 +63,32 @@ const (
 // so 2.5 sigmas is a per-row failure probability of 6.2e-3.
 //
 // The paper uses 1.9 and calls it "nearly perfect confidence"; that is 2.9%
-// one-sided. The shipped value was 3.2 (6.9e-4 per row) from 2026-09-15 to
-// 2026-09-25, chosen for per-row certainty and never measured end to end.
-// The bound-width sweep measured it on BIGANN
-// 10M at 16, 32 and 98 probes: 2.5 reads 56-58% fewer rows in the
-// bound-pruned pass than 3.2 for recall identical at three decimals and
-// equal to reading every scored row; 1.9 starts to cost (0.001). A per-row
-// failure is only a top-k flip when the row is a true neighbour within one
-// bound width of the cutoff, and the exact shortlist has already pushed the
-// cutoff past almost all of those — the margin argument of arXiv
-// 2609.09854. search.Config.BoundSigmas overrides this per process;
-// TestBitBoundCoversAtItsConfidence measures the real coverage against it.
-// What it buys, in the words the places that state it use: 99.4% per row,
-// one-sided.
+// one-sided. Measured on BIGANN 10M at 16, 32 and 98 probes, 2.5 reads
+// 56-58% fewer rows in the bound-pruned pass than 3.2 for recall identical
+// at three decimals and equal to reading every scored row; 1.9 starts to
+// cost (0.001). A per-row failure is only a top-k flip when the row is a
+// true neighbour within one bound width of the cutoff, and the exact
+// shortlist has already pushed the cutoff past almost all of those (the
+// margin argument of arXiv 2609.09854). Query.Sigmas overrides it per
+// query; TestBitBoundCoversAtItsConfidence measures the real coverage.
 const boundSigmas = 2.5
 
-// Code is the 1-bit payload of a Codes. Rows are indexed the same way
-// the int8 payload's are: by the hood's row order, which is the ids column's
-// order, which is what the candidate pass labels a score with.
+// Code is the 1-bit payload of a Quantizer. Rows are indexed in the order
+// the vectors were given to Quantize, which is the order a caller labels
+// scores with.
 type Code struct {
 	// Words is rows x ceil(dims/64) little-endian bit rows: bit j of row i
 	// is word[i*w + j/64] >> (j%64).
 	Words []uint64
-	// Centroid is the hood's own mean, in the ORIGINAL frame, subtracted
-	// before rotation. It is the codec's, not the manifest's: a patched
-	// hood's members drift from the centroid set they were filed under, and
-	// the estimator's accuracy is a function of how short the residuals
-	// are, so the codec carries the centroid it actually encoded against.
+	// Centroid is the cluster's own mean, in the ORIGINAL frame, subtracted
+	// before rotation. It is the codec's, not the index's: a cluster's
+	// members drift from the centroid they were filed under, and the
+	// estimator's accuracy is a function of how short the residuals are,
+	// so the codec carries the centroid it actually encoded against.
 	Centroid []float32
 	// Norms is ||o - c|| per row, and Aligns is <x_b, x> per row: the two
 	// scalars the estimator needs. Aligns is zeroRowAlign for a row whose
-	// vector has no direction at all (a zero vector in a cosine namespace),
+	// vector has no direction at all (a zero vector in a cosine column),
 	// which scores 0 the way CosineSim scores it.
 	Norms  []float32
 	Aligns []float32
@@ -102,12 +96,12 @@ type Code struct {
 	// derived so a reader never has to agree with the writer about how a
 	// seed is computed.
 	Seed uint64
-	// Unit says the rows are unit vectors: cosine namespaces quantize the
+	// Unit says the rows are unit vectors: cosine columns quantize the
 	// residual of the NORMALIZED vector, so the estimator's squared
 	// distance maps to cosine as 1 - d^2/2.
 	Unit bool
-	// borrowed is the immutable DQB1 column. Only the probe cache uses it;
-	// ordinary decoded and newly quantized codes keep the typed slices above.
+	// borrowed is the encoded column UnmarshalBinaryBorrowed aliased, read
+	// in place; every other column keeps the typed slices above.
 	borrowed []byte
 	rows     int
 	dims     int
@@ -244,7 +238,7 @@ func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 		for ; start < len(work) && n < simd.FillBlock; start++ {
 			row := work[start]
 			if row == nil {
-				continue // zero row in a cosine namespace
+				continue // zero row in a cosine column
 			}
 			for j, c := range b.Centroid {
 				block[j*simd.FillBlock+n] = row[j] - c
@@ -560,9 +554,9 @@ func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 	// Three ways the query cannot be scored against these bits at all: a
 	// metric this codec does not know, a query narrower than the codes, and
 	// a query whose metric disagrees with the frame the rows were encoded
-	// in (cosine rows are unit vectors, l2 rows are not — a namespace
-	// cannot change its metric, so this is corruption or a bug rather than
-	// a case). Each one scores nothing and, crucially, BOUNDS nothing: the
+	// in (cosine rows are unit vectors, l2 rows are not; a field cannot
+	// change its metric, so this is corruption or a bug rather than a
+	// case). Each one scores nothing and, crucially, BOUNDS nothing: the
 	// bound pass then reads every row and the answer is still right, just
 	// slow. A bound of zero here would silently prune the whole index.
 	if (!s.l2 && q.Metric != ivfq.Cosine) || len(q.Vector) < d || b.Unit != (q.Metric == ivfq.Cosine) ||
@@ -706,7 +700,7 @@ func scoreOf(l2 bool, dist2 float64) float64 {
 // nextUp is math.Nextafter32(x, +Inf), inlined. The row loop called
 // math.Max (an assembly function, never inlined) three times and
 // Nextafter32 once per row, and those calls were ~28% of the 1-bit scan
-// (BenchmarkBitScore profile, 2026-09-27); the builtin max and min inline and
+// (BenchmarkBitScore profile); the builtin max and min inline and
 // agree with math.Max and math.Min on every argument the loop can hold (they
 // differ only on max(+Inf, NaN), and no bound term is +Inf beside a NaN).
 func nextUp(x float32) float32 {

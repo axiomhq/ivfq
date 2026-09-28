@@ -110,7 +110,7 @@ func (c Config) Fit(ctx context.Context, vecs [][]float32) ([][]float32, []int, 
 }
 
 // sample draws s of vecs uniformly at random, in input order. It is the
-// only rows RunSampled ever hands Lloyd's, which is what bounds training
+// only rows Fit ever hands Lloyd's, which is what bounds training
 // at SampleSize(k) whatever len(vecs) is.
 //
 // A uniform random sample, not a stride: the corpus arrives sorted by id
@@ -155,12 +155,10 @@ func sample(ctx context.Context, vecs [][]float32, s int, seed int64) ([][]float
 // chosen, so the seeds spread over the corpus instead of clumping wherever
 // the density happens to be.
 //
-// This replaced a uniform random pick of k points, and it is the fix for the
-// finding: with k = N/HoodTarget the bootstrap asks for
-// thousands of centroids, and a uniform init strands a large share of them in
-// near-empty space next to a few enormous hoods. Uniform init at 10M left 74%
-// of hoods outside [S/4, 2S] with a p25 of FOUR vectors; the numbers after
-// this change are in the same section.
+// With k = N/1024 a build asks for thousands of centroids, and a uniform
+// init strands a large share of them in near-empty space next to a few
+// enormous clusters: at 10M it left 74% of clusters outside [S/4, 2S] with
+// a p25 of four vectors.
 //
 // Cost is k passes, each one distance per vector: k*n L2Sq calls, against the
 // (iters+1)*n*k Lloyd's does — about one extra iteration's worth, and it
@@ -218,8 +216,8 @@ func seedPlusPlus(ctx context.Context, vecs [][]float32, k int, rng *rand.Rand) 
 }
 
 // seedTrials is the greedy candidate count. Standard practice is
-// 2 + log(k); a flat 4 is within noise of that over the k range this engine
-// produces (977 to 97,657, so 2+log k is 9 to 13) and costs a quarter as
+// 2 + log(k); a flat 4 is within noise of that over the k range a 1M to
+// 100M index asks for (977 to 97,657, so 2+log k is 9 to 13) and costs a quarter as
 // much as 13 would. Cost is seedTrials * k * sample distance calls.
 const seedTrials = 4
 

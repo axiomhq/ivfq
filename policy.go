@@ -16,8 +16,8 @@ const (
 	// It is the ONE constant that makes a query's cost constant in N: three
 	// things are proportional to it and they pull opposite ways — candidates
 	// scored per query is nprobe x HoodTarget, pack bytes per hood is
-	// HoodTarget x dims x 4 (512 KiB at 128 dims, one S3 GET's worth and the
-	// unit the byte cache evicts), and the centroid set both the query and
+	// HoodTarget x dims x 4 (512 KiB at 128 dims, one object read's worth
+	// and the unit a cache evicts), and the centroid set both the query and
 	// the build must scan is N/HoodTarget.
 	//
 	// 1024 was CHOSEN, not swept: it makes the 1M index 977 hoods against the
@@ -58,10 +58,10 @@ const (
 	probeCeilDiv = 4
 	minProbeCeil = 16
 
-	// hoodFloor keeps a small namespace an index rather than a single pack:
+	// hoodFloor keeps a small index an index rather than a single cluster:
 	// below hoodFloor x HoodTarget vectors the rule would ask for one or two
 	// hoods, which is a full scan with no frame for split/merge/reassign to
-	// act on. Capped by RoundSqrt so a namespace at the bootstrap minimum
+	// act on. Capped by RoundSqrt so an index at the bootstrap minimum
 	// gets exactly the k it got before this rule existed.
 	hoodFloor = 16
 
@@ -69,18 +69,17 @@ const (
 	// the target. A hood that grows until it splits at T leaves two of T/2,
 	// so under steady ingest sizes spread over [T/2, T] with density 1/x and
 	// mean T/(2 ln 2): the trigger that makes the MEAN the target is
-	// 2 ln 2 = 1.386x. At 2x (until 2026-09-27) the tier's 10M ingest ended
-	// at 1.44x the target, 6,866 clusters where HoodK asks for 9,766.
+	// 2 ln 2 = 1.386x. At 2x a 10M ingest ended at 1.44x the target, 6,866
+	// clusters where HoodK asks for 9,766.
 	splitSizeNum = 7
 	splitSizeDen = 5
 	mergeSizeDiv = 4 // merge a hood below target / mergeSizeDiv
 )
 
 // DefaultNprobe is how many hoods a query probes when the caller does not
-// name a number and no recall controller has tuned the namespace. It is
-// also where the controller starts and what its ceiling is a multiple of
-// (engine/recall_tune.go), so it is a starting point rather than the last
-// word. Two bounds, and the smaller wins:
+// name a number and no recall controller has tuned the index. It is also
+// where package recall's controller starts and what its ceiling is a
+// multiple of, so it is a starting point rather than the last word. Two bounds, and the smaller wins:
 //
 //	max(budgetNprobe, k/32)  the FLOOR: a constant candidate budget, raised
 //	                         to a fixed fraction of the index once that is
@@ -97,7 +96,7 @@ const (
 // recall@10 1.000 at 1.12 ms, 24,641 candidates against 100,000.
 // Above ~400,000 vectors the ceiling is never the binding bound and 1M and 10M
 // are untouched. Below 64 hoods it floors at 16, which is at or above k for
-// every namespace the bootstrap threshold allows, so a small namespace still
+// every index the bootstrap threshold allows, so a small index still
 // probes everything and answers exactly.
 func DefaultNprobe(k int) int {
 	return max(1, min(max(budgetNprobe, k/recallProbeDiv), max(minProbeCeil, k/probeCeilDiv)))
@@ -120,9 +119,9 @@ func HoodK(total int) int {
 }
 
 // HoodSize is the per-hood target HoodK implies at this total: HoodTarget
-// once the namespace is big enough to want more than hoodFloor hoods, and
+// once the index is big enough to want more than hoodFloor hoods, and
 // total/k below that. Split and merge are stated against THIS, not against
-// HoodTarget directly, so the small-namespace floor does not make every
+// HoodTarget directly, so the small-index floor does not make every
 // hood look tiny and merge the index into one pack.
 func HoodSize(total int) int {
 	return max(1, total/HoodK(total))
@@ -130,11 +129,11 @@ func HoodSize(total int) int {
 
 // SplitAbove is the band's MAXIMUM: the hood size past which the policy
 // owes a split (SplitTarget's size trigger, 1.4x the target).
-// It is stated here rather than inlined at the trigger because a hood no
-// longer has to wait for a verb to learn it: a rewrite that leaves a hood
-// above this splits it inside the rewrite, the way SPFresh's LIRE splits a
-// posting inside the insert that overflowed it, and both readers of the
-// rule have to agree on the same number. 1,432 at a million vectors.
+// It is stated here rather than inlined at the trigger because a rewrite
+// that leaves a hood above this may split it inside the rewrite, the way
+// SPFresh's LIRE splits a posting inside the insert that overflowed it,
+// and both readers of the rule have to agree on the same number. 1,432 at
+// a million vectors.
 func SplitAbove(total int) int {
 	return HoodSize(total) * splitSizeNum / splitSizeDen
 }
@@ -161,29 +160,25 @@ func TotalCount(stats []ClusterStat) int {
 // shipped policies are stateless.
 //
 // Every trigger past Bootstrap is stated on []ClusterStat and nothing else,
-// and that is the point: a ClusterStat slice is read straight out of the
-// manifest, so consulting the policy costs O(k) arithmetic and no pass over
-// the vectors. There is deliberately NO whole-index trigger any more — the
-// drift-gated full recluster this interface used to carry (ReclusterK, with
-// its IndexStats of additive and live counts) was the last thing in the
-// engine that could decide, on its own, to touch all N vectors. It is gone,
-// and so is the regional re-fit that briefly replaced it; split, merge and
-// reclaim are the whole vocabulary, and an explicit recluster is the only
-// verb that still rebuilds a whole index when a human asks for it.
+// and that is the point: per-cluster counts and radii are what an index
+// already holds, so consulting the policy costs O(k) arithmetic and no
+// pass over the vectors. There is deliberately NO whole-index trigger:
+// nothing a Policy answers can ask for a pass over every vector. Split,
+// merge and reclaim are the whole vocabulary, and rebuilding an index is a
+// caller's explicit decision.
 type Policy interface {
-	// Bootstrap: no index exists; total = live vector count from the winner
-	// scan. ok=false leaves the namespace unindexed this cycle. This is the
-	// ONE pass over all N vectors the design allows.
+	// Bootstrap: no index exists and total is the live vector count.
+	// ok=false leaves the index unbuilt this cycle. The build that follows
+	// is the ONE pass over all N vectors the design allows.
 	Bootstrap(total int) (k int, ok bool)
 	// SplitTarget: consulted AFTER the append pass with post-append counts.
 	SplitTarget(clusters []ClusterStat) (id int, ok bool)
 }
 
-// ClusterStat is one hood as the manifest records it. Count is the number of
-// vectors the hood's PACK holds and Radius the mean distance from those
-// members to its centroid, both written by whichever verb last rewrote the
-// hood — so both are exact, delete-aware by construction (a deleted id is
-// removed from its pack in the cycle that deletes it), and free to read.
+// ClusterStat is one hood as its index records it. Count is the number of
+// vectors the hood holds and Radius the mean distance from those members
+// to its centroid, both measured by whatever last rewrote the hood, so
+// both are exact and free to read.
 // Radius == 0 means either "every member is the same point" or "emptied,
 // awaiting reclaim"; either way it is not splittable evidence.
 // Hits is query heat since the last cycle, and is 0 on a detached cycle.
@@ -193,12 +188,9 @@ type ClusterStat struct {
 	Hits      int
 }
 
-// DefaultPolicy is the one production policy. The Policy interface exists
-// so tests can substitute a stub that names a verb unconditionally; there
-// is no second shipped policy. SplitTarget is answered by a verb bounded
-// by a single hood:
-//
-//   - SplitTarget: size, then radius, for the hood one verb from the band.
+// DefaultPolicy is the one shipped policy; the Policy interface exists so
+// a test can substitute a stub that names a split unconditionally.
+// SplitTarget answers with one hood, chosen by size and then by radius.
 type DefaultPolicy struct{}
 
 func (DefaultPolicy) Bootstrap(total int) (int, bool) {
@@ -218,8 +210,8 @@ func (DefaultPolicy) SplitTarget(clusters []ClusterStat) (int, bool) {
 	// Radius > 0 is the one exception and it is not a heuristic: a hood whose
 	// members are all the same point CANNOT be split — 2-means over identical
 	// vectors puts everything in one cluster and leaves the other empty, which
-	// the reclaim verb then drops, which re-triggers the split. That is a
-	// wasted structural verb every cycle, forever. Radius 0 means unsplittable,
+	// reclaim then drops, which re-triggers the split. That is a wasted
+	// split every cycle, forever. Radius 0 means unsplittable,
 	// so skip it however fat it is.
 	if above := SplitAbove(TotalCount(clusters)); above > 0 {
 		fat := -1
@@ -290,7 +282,7 @@ func MergeTarget(stats []ClusterStat, centroids [][]float32) (tiny, host int, ok
 		if stats[tiny].Count+smallest(tiny) > above {
 			continue // no cluster anywhere has room: skip the distance scan
 		}
-		// ponytail: at most mergeTries distance scans (k × dims each) per
+		// At most mergeTries distance scans (k × dims each) per
 		// call; a layout whose smallest tinies all sit beside full hosts
 		// merges nothing this cycle. Index the centroids if that shows up.
 		if tries++; tries > mergeTries {

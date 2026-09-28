@@ -200,8 +200,8 @@ func (t Tree) Evaluations(q []float32, probe int) ([]int, int) { return t.neares
 // Searcher is Nearest, Assign and TwoStageAssign with scratch that
 // survives between calls: a warm Searcher allocates nothing per query. It
 // belongs to one goroutine; a bulk caller makes one per worker. Nearest
-// allocates its candidate buffer per call, and a fold re-routing every
-// member of its moved clusters through it allocated about 45 KB per row.
+// allocates its candidate buffer per call, about 45 KB per row when a
+// re-route runs every member of a cluster through it.
 type Searcher struct {
 	t   *Tree
 	w   treeWorkspace
