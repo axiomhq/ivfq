@@ -196,9 +196,9 @@ const splitTestFanout = 100
 // treeAssigner routes through tree at beam 16, falling back to the flat
 // scan when the beam finds nothing.
 func treeAssigner(tree *Tree, centroids [][]float32) func([]float32) int {
-	assign := tree.Assigner(16)
+	s := tree.NewSearcher()
 	return func(v []float32) int {
-		if id := assign(v); id >= 0 {
+		if id := s.Assign(v, 16); id >= 0 {
 			return id
 		}
 		return kmeans.Nearest(centroids, v)

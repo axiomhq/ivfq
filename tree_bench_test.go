@@ -290,7 +290,7 @@ func loadBeamTrain(b *testing.B, k int, sample bool) *beamTrain {
 	}
 
 	b.Logf("k=%d: training %d rows, measuring %d held-out rows, dims %d", k, len(train), len(queries), s.dims)
-	centroids, _, err := kmeans.RunSampledBudget(context.Background(), train, k, beamIters, beamSeed, 0)
+	centroids, _, err := (kmeans.Config{K: k, Iters: beamIters, Seed: beamSeed}).Fit(context.Background(), train)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func beamExact(centroids, qs [][]float32) ([]int, []float32) {
 
 // beamAssign runs one full assignment pass over the queries, fanned out over
 // GOMAXPROCS workers the way the maintainer's route batches are.
-func beamAssign(qs [][]float32, assign func([]float32) int) []int {
+func beamAssign(qs [][]float32, assign func(*Searcher, []float32) int, tree *Tree) []int {
 	ids := make([]int, len(qs))
 	var wg sync.WaitGroup
 	workers := min(runtime.GOMAXPROCS(0), len(qs))
@@ -383,8 +383,9 @@ func beamAssign(qs [][]float32, assign func([]float32) int) []int {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
+			s := tree.NewSearcher()
 			for i := w * chunk; i < min((w+1)*chunk, len(qs)); i++ {
-				ids[i] = assign(qs[i])
+				ids[i] = assign(s, qs[i])
 			}
 		}(w)
 	}
@@ -392,7 +393,7 @@ func beamAssign(qs [][]float32, assign func([]float32) int) []int {
 	return ids
 }
 
-// BenchmarkAssignerBeam measures Tree.Assigner's cost and accuracy per beam
+// BenchmarkAssignerBeam measures Searcher.Assign's cost and accuracy per beam
 // at the two centroid counts the routing decision sits between: k =
 // HoodK(1,000,000) trained over a 32×k sample, and the 10M build's k = 9,766
 // trained over the same 32×k sample. One operation is one parallel
@@ -434,16 +435,14 @@ func BenchmarkAssignerBeam(b *testing.B) {
 		b.Run(fmt.Sprintf("k=%d/f=%d", sp.k, sp.fanout), func(b *testing.B) {
 			fx := loadBeamFixture(b, sp.k, sp.sample, sp.fanout)
 			for _, beam := range sp.beams {
-				assign := fx.tree.Assigner(beam)
 				b.Run(fmt.Sprintf("beam=%d", beam), func(b *testing.B) {
-					runAssignPass(b, fx, assign)
+					runAssignPass(b, fx, func(s *Searcher, q []float32) int { return s.Assign(q, beam) })
 				})
 			}
 			if sp.twoStage {
 				for _, top := range []int{1, 2, 4, 8} {
-					assign := fx.tree.TwoStageAssigner(top)
 					b.Run(fmt.Sprintf("2stage=%d", top), func(b *testing.B) {
-						runAssignPass(b, fx, assign)
+						runAssignPass(b, fx, func(s *Searcher, q []float32) int { return s.TwoStageAssign(q, top) })
 					})
 				}
 			}
@@ -454,7 +453,7 @@ func BenchmarkAssignerBeam(b *testing.B) {
 // runAssignPass times one parallel assignment pass over the held-out rows
 // and reports ns per row, exact agreement against the brute-force scan, the
 // mean distance ratio, and the miss rate.
-func runAssignPass(b *testing.B, fx *beamFixture, assign func([]float32) int) {
+func runAssignPass(b *testing.B, fx *beamFixture, assign func(*Searcher, []float32) int) {
 	rows := float64(len(fx.queries))
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -462,7 +461,7 @@ func runAssignPass(b *testing.B, fx *beamFixture, assign func([]float32) int) {
 	var ids []int
 	for b.Loop() {
 		start := time.Now()
-		ids = beamAssign(fx.queries, assign)
+		ids = beamAssign(fx.queries, assign, &fx.tree)
 		wall += time.Since(start)
 	}
 	b.StopTimer()

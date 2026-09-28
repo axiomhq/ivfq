@@ -73,21 +73,20 @@ func TestTreeOracleAndEncoding(t *testing.T) {
 }
 
 // TestTreeRankerMatchesNearest pins Ranker to Nearest: the same leaves in
-// the same order for every probe width, with the pooled scratch reused
-// across calls and shared by concurrent callers.
-func TestTreeRankerMatchesNearest(t *testing.T) {
+// the same order for every probe width, with each goroutine's scratch
+// reused across calls.
+func TestTreeSearcherMatchesNearest(t *testing.T) {
 	v := treeData(4096, 16)
 	tree := mustBuild(v, 16)
 	for _, probe := range []int{1, 4, 16, 64} {
-		rank := tree.Ranker(probe)
 		done := make(chan error, 4)
 		for g := range 4 {
 			go func() {
+				s := tree.NewSearcher()
 				for i := g; i < len(v); i += 97 {
-					var got []int
-					rank(v[i], func(id int) { got = append(got, id) })
+					got := s.Nearest(v[i], probe)
 					if want := tree.Nearest(v[i], probe); !reflect.DeepEqual(got, want) {
-						done <- fmt.Errorf("probe %d row %d: ranker %v, Nearest %v", probe, i, got, want)
+						done <- fmt.Errorf("probe %d row %d: searcher %v, Nearest %v", probe, i, got, want)
 						return
 					}
 				}
@@ -103,10 +102,10 @@ func TestTreeRankerMatchesNearest(t *testing.T) {
 	if raceEnabled {
 		return
 	}
-	rank := tree.Ranker(16)
-	rank(v[5], func(int) {})
-	if allocs := testing.AllocsPerRun(100, func() { rank(v[5], func(int) {}) }); allocs > 0 {
-		t.Fatalf("a warm ranker allocates %.0f times per call", allocs)
+	s := tree.NewSearcher()
+	s.Nearest(v[5], 16)
+	if allocs := testing.AllocsPerRun(100, func() { s.Nearest(v[5], 16) }); allocs > 0 {
+		t.Fatalf("a warm searcher allocates %.0f times per call", allocs)
 	}
 }
 
@@ -255,11 +254,11 @@ func TestTreeTwoStage(t *testing.T) {
 	v := treeData(3000, 32)
 	for _, tree := range []Tree{mustBuild(v, 16), mustRoundTrip(t, v, 16)} {
 		fan := len(tree.nodes[tree.root].children)
-		assign := tree.TwoStageAssigner(fan)
+		s := tree.NewSearcher()
 		for i := 0; i < 200; i++ {
 			q := v[i]
 			want := kmeans.Nearest(v, q)
-			if got := assign(q); got != want {
+			if got := s.TwoStageAssign(q, fan); got != want {
 				t.Fatalf("top=%d: row %d: two-stage %d, flat %d", fan, i, got, want)
 			}
 			ids, evals := tree.TwoStageNearest(q, fan)
@@ -280,7 +279,7 @@ func TestTreeTwoStage(t *testing.T) {
 	}
 	// A single-holder tree has no fan: the two-stage scan is the flat scan.
 	small := mustBuild(v[:30], 32)
-	if got := small.TwoStageAssigner(4)(v[0]); got != kmeans.Nearest(v[:30], v[0]) {
+	if got := small.NewSearcher().TwoStageAssign(v[0], 4); got != kmeans.Nearest(v[:30], v[0]) {
 		t.Fatalf("single holder: two-stage %d, flat %d", got, kmeans.Nearest(v[:30], v[0]))
 	}
 }
@@ -439,9 +438,9 @@ func TestTreeAssignerMatchesNearest(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			assign := tree.Assigner(16)
+			s := tree.NewSearcher()
 			for _, q := range treeData(80, 8) {
-				got := assign(q)
+				got := s.Assign(q, 16)
 				want := tree.Nearest(q, 16)
 				if len(want) == 0 {
 					if got != -1 {
@@ -451,14 +450,14 @@ func TestTreeAssignerMatchesNearest(t *testing.T) {
 					t.Fatalf("assignment %d != query routing %d", got, want[0])
 				}
 			}
-			if got := assign([]float32{1}); got != -1 {
+			if got := s.Assign([]float32{1}, 16); got != -1 {
 				t.Fatalf("invalid dimensions: %d", got)
 			}
 		})
 	}
 }
 
-func BenchmarkTreeAssigner(b *testing.B) {
+func BenchmarkTreeSearcher(b *testing.B) {
 	vectors := treeData(10000, 128)
 	tree, err := Build(context.Background(), vectors, 100)
 	if err != nil {
@@ -467,15 +466,15 @@ func BenchmarkTreeAssigner(b *testing.B) {
 	for _, reuse := range []bool{false, true} {
 		name := "nearest"
 		if reuse {
-			name = "assigner"
+			name = "searcher"
 		}
 		b.Run(name, func(b *testing.B) {
-			assign := tree.Assigner(16)
+			s := tree.NewSearcher()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				q := vectors[i%len(vectors)]
 				if reuse {
-					_ = assign(q)
+					_ = s.Assign(q, 16)
 				} else {
 					_ = tree.Nearest(q, 16)
 				}
@@ -505,11 +504,11 @@ func TestTreeAssignerAgreesWithFlatOnByteVectors(t *testing.T) {
 	centroids := bytes(4000)
 	queries := bytes(400)
 	tree := mustBuild(centroids, 100)
-	assign := tree.Assigner(16)
+	s := tree.NewSearcher()
 	agree := 0
 	for _, q := range queries {
 		want := kmeans.Nearest(centroids, q)
-		if got := assign(q); got == want {
+		if got := s.Assign(q, 16); got == want {
 			agree++
 		}
 		if probes, _ := tree.Evaluations(q, 16); !contains(probes, want) {
@@ -578,10 +577,10 @@ func TestTreeUpsertReplaceAndAppend(t *testing.T) {
 	// ~1e-2) two in-cluster candidates within a percent of each other can
 	// swap; a pick that close is a tie, not a routing error. A wrong holder
 	// or a stale slot shows up as a pick many times farther.
-	assign := tree.Assigner(16)
+	s := tree.NewSearcher()
 	misses := 0
 	for _, q := range treeRandScaled(500, d, 101, spacing, noise) {
-		got, want := assign(q), kmeans.Nearest(cur, q)
+		got, want := s.Assign(q, 16), kmeans.Nearest(cur, q)
 		if got != want && L2Sq(q, cur[got]) > L2Sq(q, cur[want])*1.02 {
 			misses++
 		}
@@ -593,12 +592,12 @@ func TestTreeUpsertReplaceAndAppend(t *testing.T) {
 	// Exact matches (distance zero) leave no room for rounding: every
 	// appended leaf and every replaced slot is found by its own vector.
 	for _, id := range appended {
-		if got := assign(cur[id]); got != id {
+		if got := s.Assign(cur[id], 16); got != id {
 			t.Fatalf("appended %d not found by a query equal to it: %d", id, got)
 		}
 	}
 	for _, id := range replaced {
-		if got := assign(cur[id]); got != id {
+		if got := s.Assign(cur[id], 16); got != id {
 			t.Fatalf("replaced %d not found by a query equal to it: %d", id, got)
 		}
 	}

@@ -155,7 +155,7 @@ func TestRunCancelled(t *testing.T) {
 		t.Fatalf("Run on cancelled ctx = (%v, %v, %v)", c, a, err)
 	}
 	big := blobs(5, kmeans.SampleSize(2)+1, []float32{0, 0}, []float32{5, 5})
-	if c, a, err := kmeans.RunSampled(cancelled, big, 2, 10, 1); err != context.Canceled || c != nil || a != nil {
+	if c, a, err := (kmeans.Config{K: 2, Iters: 10, Seed: 1}).Fit(cancelled, big); err != context.Canceled || c != nil || a != nil {
 		t.Fatalf("RunSampled on cancelled ctx = (%v, %v, %v)", c, a, err)
 	}
 }
@@ -174,7 +174,7 @@ func TestRunSampledScratchIsBounded(t *testing.T) {
 	}
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	if _, assign, err := kmeans.RunSampled(ctx, vecs, k, 2, 1); err != nil || len(assign) != n {
+	if _, assign, err := (kmeans.Config{K: k, Iters: 2, Seed: 1}).Fit(ctx, vecs); err != nil || len(assign) != n {
 		t.Fatalf("RunSampled = (%d assigned, %v)", len(assign), err)
 	}
 	runtime.ReadMemStats(&after)
@@ -224,7 +224,7 @@ func sampledCorpus() ([][]float32, int) {
 func TestRunSampledCancelDuringSampling(t *testing.T) {
 	vecs, k := sampledCorpus()
 	pc := &cancelAfterPolls{Context: ctx, at: 2}
-	c, a, err := kmeans.RunSampled(pc, vecs, k, 10, 1)
+	c, a, err := (kmeans.Config{K: k, Iters: 10, Seed: 1}).Fit(pc, vecs)
 	if err != context.Canceled || c != nil || a != nil {
 		t.Fatalf("RunSampled cancelled while sampling = (%v, %d assigned, %v)", c, len(a), err)
 	}
@@ -241,13 +241,13 @@ func TestRunSampledCancelDuringSampling(t *testing.T) {
 func TestRunSampledCancelMidPass(t *testing.T) {
 	vecs, k := sampledCorpus()
 	full := &cancelAfterPolls{Context: ctx, at: math.MaxInt64}
-	if _, _, err := kmeans.RunSampled(full, vecs, k, 10, 1); err != nil {
+	if _, _, err := (kmeans.Config{K: k, Iters: 10, Seed: 1}).Fit(full, vecs); err != nil {
 		t.Fatal(err)
 	}
 	chunks := int64((len(vecs) + 255) / 256)
 	at := full.polls.Load() - chunks/2
 	pc := &cancelAfterPolls{Context: ctx, at: at}
-	c, a, err := kmeans.RunSampled(pc, vecs, k, 10, 1)
+	c, a, err := (kmeans.Config{K: k, Iters: 10, Seed: 1}).Fit(pc, vecs)
 	if err != context.Canceled || c != nil || a != nil {
 		t.Fatalf("RunSampled cancelled mid-pass = (%v, %d assigned, %v)", c, len(a), err)
 	}

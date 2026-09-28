@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/axiomhq/ivfq/kmeans"
 	"math"
-	"sync"
 )
 
 type treeNode struct {
@@ -145,7 +144,7 @@ func (t *Tree) build(ctx context.Context, ids []int, depth int) (int, int, error
 		vs[i] = t.leaves[id]
 	}
 	k := min(t.fanout, (len(ids)+t.fanout-1)/t.fanout)
-	_, assign, err := kmeans.RunSampled(ctx, vs, k, 6, int64(0x51f15e+depth))
+	_, assign, err := (kmeans.Config{K: k, Iters: 6, Seed: int64(0x51f15e + depth)}).Fit(ctx, vs)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -198,41 +197,61 @@ func (t Tree) Nearest(q []float32, probe int) []int {
 // Evaluations is Nearest with the number of centroid distance evaluations.
 func (t Tree) Evaluations(q []float32, probe int) ([]int, int) { return t.nearest(q, probe) }
 
-// Assigner ranks one leaf with the same beam traversal as Nearest. Each
-// concurrent caller borrows its own reusable scratch; no per-row tree-sized
-// allocations or unused top-k leaf sort are needed by bulk assignment.
-func (t Tree) Assigner(beam int) func([]float32) int {
-	var pool sync.Pool
-	pool.New = func() any { return new(treeWorkspace) }
-	return func(q []float32) int {
-		w := pool.Get().(*treeWorkspace)
-		best, _ := t.nearestInto(w, q, beam, 1)
-		id := -1
-		if len(best) > 0 {
-			id = best[0].id
-		}
-		pool.Put(w)
-		return id
-	}
+// Searcher is Nearest, Assign and TwoStageAssign with scratch that
+// survives between calls: a warm Searcher allocates nothing per query. It
+// belongs to one goroutine; a bulk caller makes one per worker. Nearest
+// allocates its candidate buffer per call, and a fold re-routing every
+// member of its moved clusters through it allocated about 45 KB per row.
+type Searcher struct {
+	t   *Tree
+	w   treeWorkspace
+	out []int
 }
 
-// Ranker is Nearest for bulk callers: each call visits the same leaves in
-// the same order as Nearest(q, probe), on scratch borrowed from a pool the
-// concurrent callers share. Nearest allocates its candidate buffer per
-// call; a fold re-routing every member of its moved hoods through it
-// allocated about 45 KB per row, 200 GB for one 4,096-hood fold
-// (measured on a 4,096-cluster re-route).
-func (t Tree) Ranker(probe int) func(q []float32, visit func(id int)) {
-	var pool sync.Pool
-	pool.New = func() any { return new(treeWorkspace) }
-	return func(q []float32, visit func(id int)) {
-		w := pool.Get().(*treeWorkspace)
-		best, _ := t.nearestInto(w, q, probe, probe)
-		for _, x := range best {
-			visit(x.id)
-		}
-		pool.Put(w)
+// NewSearcher returns a Searcher over t. t must not change while the
+// Searcher is in use.
+func (t *Tree) NewSearcher() *Searcher { return &Searcher{t: t} }
+
+// Nearest is Tree.Nearest: up to probe leaf ids, nearest first, in the
+// same order. The slice is the Searcher's own and the next call overwrites
+// it.
+func (s *Searcher) Nearest(q []float32, probe int) []int {
+	best, _ := s.t.nearestInto(&s.w, q, probe, probe)
+	s.out = s.out[:0]
+	for _, x := range best {
+		s.out = append(s.out, x.id)
 	}
+	return s.out
+}
+
+// Assign is the leaf a beam-wide search ranks first, or -1 when the tree
+// is empty or q is the wrong width: the same leaf Nearest(q, beam)[0]
+// names.
+func (s *Searcher) Assign(q []float32, beam int) int {
+	best, _ := s.t.nearestInto(&s.w, q, beam, 1)
+	if len(best) == 0 {
+		return -1
+	}
+	return best[0].id
+}
+
+// TwoStageAssign ranks one leaf in two exact stages: a distance for every
+// child of the root, then a distance for every leaf under the top
+// subtrees. It is TwoStageNearest(q, top)[0], or -1.
+//
+// Measured, it is a wash for bulk routing: on real BIGANN rows the stage-two
+// scan is the whole cost and the beam's pruning wins on large trees, so the
+// maintainer's router keeps the beam. Small trees are where this wins: at
+// k = 977 a top-4 two-stage reached 99.1% agreement at 2.5x less wall per
+// row than beam 16, because the stage-one fan there is 10 wide and four
+// subtrees cover nearly the whole set. Choose by the benchmark, not by the
+// evaluation count.
+func (s *Searcher) TwoStageAssign(q []float32, top int) int {
+	best, _ := s.t.twoStageInto(&s.w, q, top, 1)
+	if len(best) == 0 {
+		return -1
+	}
+	return best[0].id
 }
 
 type treeWorkspace struct {
@@ -338,41 +357,7 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 	return w.best, evals
 }
 
-// TwoStageAssigner ranks one leaf in two exact stages: a distance for every
-// child of the root, then a distance for every leaf under the best top of
-// them. The beam search prunes at every level, so on a tree deeper than the
-// fan — k-means grouping is never balanced enough to keep one level under
-// the fanout — a miss at any level loses the true centroid for good, and
-// recall only comes back with the beam wide enough to be most of a brute
-// scan. The two-stage search spends its whole budget on the one decision
-// that can miss, which subtree, and is exact everywhere else: 3.2x fewer
-// centroid evaluations than beam 16 at k = 9,766.
-//
-// Measured, it is a wash for bulk routing: on real BIGANN rows the stage-two
-// subtree scans gather their holders cold and give back the evaluation
-// savings (97.0% exact agreement at top 8 against the beam's 96.8% at the
-// same nanoseconds per row — BenchmarkAssignerBeam in tree_bench_test.go),
-// so the maintainer's router keeps the beam. Small trees are where this
-// wins: at k = 977 a top-4 two-stage reached 99.1% agreement at 2.5x less
-// wall per row than beam 16, because the stage-one fan there is 10 wide and
-// four subtrees cover nearly the whole set. Choose by the benchmark, not by
-// the evaluation count.
-func (t Tree) TwoStageAssigner(top int) func([]float32) int {
-	var pool sync.Pool
-	pool.New = func() any { return new(treeWorkspace) }
-	return func(q []float32) int {
-		w := pool.Get().(*treeWorkspace)
-		best, _ := t.twoStageInto(w, q, top, 1)
-		id := -1
-		if len(best) > 0 {
-			id = best[0].id
-		}
-		pool.Put(w)
-		return id
-	}
-}
-
-// TwoStageNearest is TwoStageAssigner's search with the picked leaf ids,
+// TwoStageNearest is TwoStageAssign's search with the picked leaf ids,
 // nearest first, and the number of centroid distance evaluations returned —
 // the pairing Nearest and Evaluations give the beam search.
 func (t Tree) TwoStageNearest(q []float32, top int) ([]int, int) {

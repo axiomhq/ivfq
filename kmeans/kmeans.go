@@ -43,33 +43,42 @@ func SampleSizeForBudget(k, dims, bytes int) int {
 	return max(1, min(SampleSize(k), bytes/(dims*4)))
 }
 
-// RunSampled fits k centroids on a deterministic random sample of at most
-// SampleSize(k) vectors, then assigns EVERY vector in one parallel pass
-// (assignAll). This is the only k-means the build runs at scale: with
-// fixed-size hoods k = N/HoodTarget, so global Lloyd's would be O(N^2/S)
-// per iteration — eleven passes of it at 10M is hours. Sampling collapses
+// Config is one k-means fit.
+type Config struct {
+	// K is how many centroids to fit, clamped to [1, len(vecs)].
+	K int
+	// Iters is how many Lloyd iterations follow the k-means++ seeding.
+	Iters int
+	// Seed fixes the training sample, the seeding draw and every reseed,
+	// so one Config over one input gives one answer.
+	Seed int64
+	// Spherical renormalizes every centroid to unit length after each
+	// mean, for cosine fields: plain L2 against unit centroids is then
+	// monotone in cosine, so assignment stays L2 everywhere.
+	Spherical bool
+	// MaxBytes caps the training sample by its float32 footprint on top of
+	// SampleSize(K). Zero means SampleSize(K) alone.
+	MaxBytes int
+}
+
+// SplitIters is the iteration count a cluster split uses:
+// Config{K: 2, Iters: SplitIters}.
+const SplitIters = 8
+
+// Fit fits c.K centroids on a deterministic random sample of at most
+// SampleSize(c.K) vectors, then assigns EVERY vector in one parallel pass.
+// It returns the centroids and each vector's centroid index. This is the
+// only k-means a build runs at scale: with fixed-size clusters k = N/1024,
+// so Lloyd's over all N would be O(N^2/S) per iteration. Sampling collapses
 // the iterated term to the sample and leaves exactly one O(N x k) pass.
 //
-// Identical to Run when the sample covers the corpus, so small namespaces
-// (and every existing test) get the full fit unchanged.
-func RunSampled(ctx context.Context, vecs [][]float32, k, iters int, seed int64) ([][]float32, []int, error) {
-	return runSampledLimit(ctx, vecs, k, iters, seed, false, 0)
-}
-
-// RunSampledSpherical is RunSampled for cosine namespaces.
-func RunSampledSpherical(ctx context.Context, vecs [][]float32, k, iters int, seed int64) ([][]float32, []int, error) {
-	return runSampledLimit(ctx, vecs, k, iters, seed, true, 0)
-}
-
-func RunSampledBudget(ctx context.Context, vecs [][]float32, k, iters int, seed int64, bytes int) ([][]float32, []int, error) {
-	return runSampledLimit(ctx, vecs, k, iters, seed, false, bytes)
-}
-
-func RunSampledSphericalBudget(ctx context.Context, vecs [][]float32, k, iters int, seed int64, bytes int) ([][]float32, []int, error) {
-	return runSampledLimit(ctx, vecs, k, iters, seed, true, bytes)
-}
-
-func runSampledLimit(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spherical bool, bytes int) ([][]float32, []int, error) {
+// When the sample covers the corpus the result is the plain fit over every
+// vector. An empty corpus returns nil, nil, nil. A cancelled ctx returns
+// its error and no result: checked at every seeding step, every Lloyd
+// iteration, and every assignment chunk. The result is bit-identical
+// whatever GOMAXPROCS is.
+func (c Config) Fit(ctx context.Context, vecs [][]float32) ([][]float32, []int, error) {
+	k, iters, seed, spherical, bytes := c.K, c.Iters, c.Seed, c.Spherical, c.MaxBytes
 	n := len(vecs)
 	if n == 0 {
 		return nil, nil, nil
@@ -478,24 +487,6 @@ func Nearest(centroids [][]float32, v []float32) int {
 		}
 	}
 	return best
-}
-
-// splitIters is Lloyd's iteration cap for a split. A split fits a handful
-// of centroids over one hood's members, where convergence is fast and the
-// cost is paid inside a rewrite: eight is what the split verb has always
-// used and SplitParts inherits it, so a hood cut at rewrite time and the
-// same hood cut by the split verb are the same kind of parts.
-const splitIters = 8
-
-// Split is 2-means: the cluster-split primitive. A cancelled ctx returns
-// its error and no result, as Run.
-func Split(ctx context.Context, vecs [][]float32, seed int64) ([][]float32, []int, error) {
-	return run(ctx, vecs, 2, splitIters, seed, false)
-}
-
-// SplitSpherical is Split's spherical counterpart.
-func SplitSpherical(ctx context.Context, vecs [][]float32, seed int64) ([][]float32, []int, error) {
-	return run(ctx, vecs, 2, splitIters, seed, true)
 }
 
 // farthest finds the unclaimed vector with the greatest distance to its

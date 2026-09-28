@@ -18,7 +18,7 @@ func TestRunSampledBoundsTraining(t *testing.T) {
 		}
 		vecs[i] = v
 	}
-	centroids, assign, _ := RunSampled(context.Background(), vecs, k, 10, 1)
+	centroids, assign, _ := (Config{K: k, Iters: 10, Seed: 1}).Fit(context.Background(), vecs)
 	// RunSampled hands Lloyd's exactly sample(SampleSize(k)) and nothing
 	// else: the centroids are the fit over that sample, bit for bit.
 	trained, err := sample(context.Background(), vecs, SampleSize(k), 1)
@@ -50,7 +50,7 @@ func TestRunSampledBoundsTraining(t *testing.T) {
 	}
 	// A corpus the sample already covers gets the full fit, unchanged.
 	small := vecs[:SampleSize(k)]
-	got, _, _ := RunSampled(context.Background(), small, k, 10, 1)
+	got, _, _ := (Config{K: k, Iters: 10, Seed: 1}).Fit(context.Background(), small)
 	want, _, _ := Run(context.Background(), small, k, 10, 1)
 	for i := range got {
 		for d := range got[i] {
