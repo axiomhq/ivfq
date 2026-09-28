@@ -1,7 +1,9 @@
 package rabitq
 
 import (
+	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -27,5 +29,30 @@ func TestRotationPreservesNorm(t *testing.T) {
 	}
 	if math.Abs(n0-n1) > 1e-5 {
 		t.Fatalf("norm %v -> %v", n0, n1)
+	}
+}
+
+func TestRotatePairsMatchesApply(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 4))
+	for _, dims := range []int{2, 17, 128} {
+		rot := NewRotation(99, dims)
+		rows := make([][]float32, simd.FillBlock)
+		block := make([]float32, dims*simd.FillBlock)
+		for r := range rows {
+			rows[r] = make([]float32, dims)
+			for j := range rows[r] {
+				rows[r][j] = float32(rng.NormFloat64())
+				block[j*simd.FillBlock+r] = rows[r][j]
+			}
+		}
+		rot.applyBlock(block)
+		for r, row := range rows {
+			rot.Apply(row)
+			for j, x := range row {
+				if math.Float32bits(block[j*simd.FillBlock+r]) != math.Float32bits(x) {
+					t.Fatalf("dims=%d row %d dim %d: block %v, Apply %v", dims, r, j, block[j*simd.FillBlock+r], x)
+				}
+			}
+		}
 	}
 }

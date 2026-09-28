@@ -3,9 +3,11 @@ package rabitq
 import (
 	"encoding/binary"
 	"github.com/axiomhq/ivfq"
+	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"math/rand"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -14,6 +16,7 @@ func bitOpts(metric ivfq.Metric, dims int) Options {
 }
 
 // rotOf is the rotation c was encoded in.
+
 func rotOf(c Quantizer) *Rotation { return NewRotation(c.Code.Seed, c.Dims) }
 
 func mustEncode(t *testing.T, vectors [][]float32, opts Options) Quantizer {
@@ -90,7 +93,9 @@ func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 }
 
 // Every scalar a 1-bit score depends on prunes the exact rerank before a
+
 // full vector is read, so bits the encoder could never write must not decode.
+
 func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 	vectors := corpus(4, 64)
 	b, err := mustEncode(t, vectors, bitOpts(ivfq.L2, len(vectors[0]))).MarshalBinary()
@@ -154,11 +159,17 @@ func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 }
 
 // The estimator is the paper's: unbiased in the inner product, and so
+
 // unbiased in the squared distance it reconstructs. A query's rows share its
+
 // rotation and its 4-bit rounding, so their errors are NOT independent and
+
 // the unit of evidence is the QUERY: take each query's mean error, and ask
+
 // whether the mean of those is inside the standard error of their own
+
 // spread. Anything else would call sampling noise a bias.
+
 func TestBitEstimatorIsUnbiased(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(2000, 128)
@@ -196,11 +207,17 @@ func TestBitEstimatorIsUnbiased(t *testing.T) {
 }
 
 // The bound is probabilistic, so the test is coverage: the share of rows
+
 // whose exact score exceeds the bound must sit at the tail boundSigmas
+
 // names, and not above it. An axis-aligned corpus is in the set because
+
 // that is what the random rotation exists for — without it, a corpus whose
+
 // energy sits on a few axes has a quantization error the bound does not
+
 // describe.
+
 func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 	rng := rand.New(rand.NewSource(11))
 	axis := func(n, d int) [][]float32 {
@@ -261,7 +278,9 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 }
 
 // Query.Exact takes the probabilistic bound out of the picture: every row
+
 // survives, so a bound-pruned pass over them is exact again.
+
 func TestBitExactQueryBoundsNothing(t *testing.T) {
 	vectors := corpus(200, 64)
 	codes := mustEncode(t, vectors, Options{Metric: ivfq.L2, Rotation: NewRotation(3, len(vectors[0]))})
@@ -274,15 +293,25 @@ func TestBitExactQueryBoundsNothing(t *testing.T) {
 }
 
 // The two passes a query runs, in miniature:
+
 // a shortlist of k x multiplier rows scored exactly, then every remaining row
+
 // whose bound still reaches the cutoff. It is the bound pass, not the
+
 // shortlist, that carries 1-bit recall — the shortlist alone is 0.5 at 2x
+
 // here — and what it costs is rows.
+
 //
+
 // The fixture is deliberately the worst case an ANN index can be handed:
+
 // isotropic Gaussian vectors have no structure at all, so the top ten sit in
+
 // a crowd of near-ties and the error band covers a large share of them. Real
+
 // corpora are not like this; SIFT1M behaves far better.
+
 func TestBitTwoPassRecallAndRows(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors, queries := corpus(3000, 128), corpus(20, 128)
@@ -327,7 +356,9 @@ func TestBitTwoPassRecallAndRows(t *testing.T) {
 }
 
 // A zero vector has no direction: its cosine is 0, exactly, and the codec
+
 // says so rather than estimating a distance on the unit sphere it is not on.
+
 func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 	vectors := corpus(8, 16)
 	vectors[3] = make([]float32, 16)
@@ -345,8 +376,11 @@ func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 }
 
 // A query that cannot be scored against these bits must PRUNE nothing: the
+
 // bound pass then reads every row and the answer is still right. A bound of
+
 // zero would silently drop the whole index instead.
+
 func TestBitScorerBoundsNothingWhenItCannotScore(t *testing.T) {
 	vectors := corpus(16, 32)
 	l2 := mustEncode(t, vectors, bitOpts(ivfq.L2, len(vectors[0])))
@@ -374,9 +408,13 @@ func TestBitScorerBoundsNothingWhenItCannotScore(t *testing.T) {
 }
 
 // The rotation is reproducible from the seed alone and is an isometry —
+
 // that is what lets the pack store eight bytes instead of a D x D matrix,
+
 // and what makes ||o - c|| in the original frame the same number the bits
+
 // were taken in.
+
 func TestRotationIsReproducibleAndOrthogonal(t *testing.T) {
 	const dims = 96
 	v := corpus(1, dims)[0]
@@ -446,6 +484,7 @@ func BenchmarkBitScore(b *testing.B) {
 }
 
 // nextUp is math.Nextafter32 toward +Inf, bit for bit.
+
 func TestNextUpIsNextafter32(t *testing.T) {
 	inf := float32(math.Inf(1))
 	xs := []float32{0, float32(math.Copysign(0, -1)), 1, -1, inf, -inf, float32(math.NaN()),
@@ -462,3 +501,89 @@ func TestNextUpIsNextafter32(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkQuantizeL2(b *testing.B) {
+	const rows, dims = 1024, 128
+	vectors := make([][]float32, rows)
+	for i := range vectors {
+		v := make([]float32, dims)
+		for j := range v {
+			v[j] = float32((i*31+j*17)%503-251) / 8
+		}
+		vectors[i] = v
+	}
+	opts := Options{Metric: ivfq.L2, Rotation: NewRotation(3, dims)}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Quantize(vectors, opts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// fillRows must produce fillRow's codes bit for bit: same bits, and the
+
+// same float32 norms and alignments, for l2 and cosine, zero rows, rows
+
+// equal to the centroid and blocks cut short.
+
+func TestFillRowsMatchesFillRow(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	for _, dims := range []int{1, 2, 3, 16, 100, 128, 129} {
+		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+			for _, rows := range []int{0, 1, simd.FillBlock - 1, simd.FillBlock, 3*simd.FillBlock + 5} {
+				vectors := make([][]float32, rows)
+				for i := range vectors {
+					v := make([]float32, dims)
+					switch i % 7 {
+					case 3: // zero vector
+					case 5: // an i8-like row
+						for j := range v {
+							v[j] = float32(rng.Intn(256) - 128)
+						}
+					default:
+						for j := range v {
+							v[j] = float32(rng.NormFloat64() * 10)
+						}
+					}
+					vectors[i] = v
+				}
+				if rows > 2 {
+					vectors[1] = slices.Clone(vectors[2]) // duplicates pull a row onto the mean when rows == 2
+				}
+				got, err := quantizeBits(vectors, metric, NewRotation(11, dims))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := *got.Code
+				want.Words = make([]uint64, len(want.Words))
+				want.Norms = make([]float32, len(want.Norms))
+				want.Aligns = slices.Clone(got.Code.Aligns)
+				rot := NewRotation(11, dims)
+				scratch := make([]float32, dims)
+				for i, v := range vectors {
+					row := workRow(v, metric == ivfq.Cosine)
+					if row == nil {
+						continue
+					}
+					want.Aligns[i] = 0
+					want.fillRow(i, row, rot, scratch)
+				}
+				if !slices.Equal(got.Code.Words, want.Words) || !bitsEqual(got.Code.Norms, want.Norms) || !bitsEqual(got.Code.Aligns, want.Aligns) {
+					t.Fatalf("dims=%d %s rows=%d: fillRows differs from fillRow", dims, metric, rows)
+				}
+			}
+		}
+	}
+	// A hood of one row: the row is its own centroid, zero norm, no bits.
+	q, err := quantizeBits([][]float32{{1, 2, 3}}, ivfq.L2, NewRotation(5, 3))
+	if err != nil || q.Code.Norms[0] != 0 || q.Code.Aligns[0] != 0 || q.Code.Words[0] != 0 {
+		t.Fatalf("single row: %+v %v", q.Code, err)
+	}
+}
+
+func bitsEqual(a, b []float32) bool {
+	return slices.EqualFunc(a, b, func(x, y float32) bool { return math.Float32bits(x) == math.Float32bits(y) })
+}
+
+// applyBlock is Apply on each row of the block, bit for bit.

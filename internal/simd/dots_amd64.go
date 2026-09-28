@@ -26,10 +26,3 @@ func Dots(q, block, out []float32) {
 
 //go:noescape
 func dotsAVX2FMA(q *float32, block *float32, dims int, rows int, out *float32)
-
-func dotsGeneric(q, block, out []float32) {
-	dims := len(q)
-	for r := range out {
-		out[r] = Dot(q, block[r*dims:(r+1)*dims])
-	}
-}
