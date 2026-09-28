@@ -1,6 +1,7 @@
 package rabitq
 
 import (
+	"errors"
 	"fmt"
 	"github.com/axiomhq/ivfq"
 	"math"
@@ -32,23 +33,21 @@ func (c Quantizer) Rows() int { return c.Code.Rows() }
 // accounting.
 func (c Quantizer) Retained() int { return c.Code.retained() }
 
-// Options is what Encode needs beyond the vectors: the field's declared
-// width (an empty hood still publishes a shaped column), the metric (cosine
-// hoods encode unit vectors), and the rotation seed.
+// Options is what Quantize needs beyond the vectors: the metric (cosine
+// columns encode unit vectors) and the rotation, which also fixes the
+// column's width so an empty cluster still publishes a shaped column.
 type Options struct {
-	Dims   int
-	Metric ivfq.Metric
-	Seed   uint64
+	Metric   ivfq.Metric
+	Rotation *Rotation
 }
 
 // Quantize is the ONE door a hood's codes are written through. vectors are the hood's rows in id order, already at
 // the precision the exact rerank will read them at.
 func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
-	dims := opts.Dims
-	if dims <= 0 && len(vectors) > 0 {
-		dims = len(vectors[0])
+	if opts.Rotation == nil {
+		return Quantizer{}, errors.New("rabitq: 1-bit codes need a rotation")
 	}
-	return quantizeBits(vectors, dims, opts.Metric, opts.Seed)
+	return quantizeBits(vectors, opts.Metric, opts.Rotation)
 }
 
 // Empty returns a column with no rows around centroid, in opts' frame:
@@ -56,11 +55,14 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 // is encoded against the cluster's own centroid rather than the mean of
 // whichever rows happened to start the block.
 func Empty(centroid []float32, opts Options) (Quantizer, error) {
-	if opts.Dims <= 0 || len(centroid) != opts.Dims {
-		return Quantizer{}, fmt.Errorf("quant: empty column needs a %d-wide centroid, got %d", opts.Dims, len(centroid))
+	if opts.Rotation == nil {
+		return Quantizer{}, errors.New("rabitq: 1-bit codes need a rotation")
 	}
-	if opts.Seed == 0 {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes need a nonzero rotation seed")
+	if opts.Rotation.dims <= 0 || len(centroid) != opts.Rotation.dims {
+		return Quantizer{}, fmt.Errorf("rabitq: empty column needs a %d-wide centroid, got %d", opts.Rotation.dims, len(centroid))
+	}
+	if opts.Rotation.seed == 0 {
+		return Quantizer{}, errors.New("rabitq: 1-bit codes need a nonzero rotation seed")
 	}
 	if opts.Metric != ivfq.L2 && opts.Metric != ivfq.Cosine {
 		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", opts.Metric)
@@ -70,7 +72,7 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 	if unit {
 		c = workRow(c, true)
 	}
-	return Quantizer{Dims: opts.Dims, Code: &Code{Centroid: c, Seed: opts.Seed, Unit: unit}}, nil
+	return Quantizer{Dims: opts.Rotation.dims, Code: &Code{Centroid: c, Seed: opts.Rotation.seed, Unit: unit}}, nil
 }
 
 // Select returns a column holding only the rows at the given indexes, in
@@ -130,12 +132,15 @@ func (c Quantizer) Select(rows []int) (Quantizer, error) {
 // move INTO a split's new hood from a neighbouring one are re-encoded
 // against the copied column's centroid, so the whole column stays one
 // frame without re-quantizing the rows that were copied verbatim.
-func AppendRows(c Quantizer, vectors [][]float32) (Quantizer, error) {
+func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, error) {
 	b := c.Code
 	if b == nil {
-		return Quantizer{}, fmt.Errorf("quant: append on a column with no payload")
+		return Quantizer{}, errors.New("rabitq: append on a column with no payload")
 	}
 	dims := c.Dims
+	if rot == nil || rot.seed != b.Seed || rot.dims != dims {
+		return Quantizer{}, fmt.Errorf("rabitq: append needs the column's rotation (seed %d, %d wide)", b.Seed, dims)
+	}
 	w := bitWords(dims)
 	rows := b.Rows()
 	extra := len(vectors)
@@ -165,7 +170,6 @@ func AppendRows(c Quantizer, vectors [][]float32) (Quantizer, error) {
 		copy(out.Norms, b.Norms)
 		copy(out.Aligns, b.Aligns)
 	}
-	rot := rotationFor(b.Seed, dims)
 	scratch := make([]float32, dims)
 	for i, v := range vectors {
 		if len(v) != dims {
@@ -213,6 +217,9 @@ func UnmarshalBinaryBorrowed(data []byte) (Quantizer, error) {
 type Query struct {
 	Vector []float32
 	Metric ivfq.Metric
+	// Rotation is the frame the columns were encoded in. A column whose
+	// seed or width disagrees with it cannot be scored and bounds nothing.
+	Rotation *Rotation
 	// Exact drops the bound: every row's bound is +Inf, so the bound-pruned
 	// pass reads every row and the answer is exactly the top k over the
 	// probed hoods. It is how a caller buys back the certainty the 1-bit
@@ -225,8 +232,8 @@ type Query struct {
 	invNorm float64 // 0 for a zero cosine query, which scores 0 everywhere
 }
 
-func NewQuery(q []float32, metric ivfq.Metric) Query {
-	out := Query{Vector: q, Metric: metric}
+func NewQuery(q []float32, metric ivfq.Metric, rot *Rotation) Query {
+	out := Query{Vector: q, Metric: metric, Rotation: rot}
 	if metric == ivfq.Cosine {
 		var qn float64
 		for _, x := range q {
@@ -319,6 +326,3 @@ type ranked struct {
 	id    int
 	score float32
 }
-
-// Codes keeps the name existing importers already use.
-type Codes = Quantizer

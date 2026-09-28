@@ -5,7 +5,6 @@ import (
 	"math"
 	"math/bits"
 	"math/rand/v2"
-	"sync"
 )
 
 // The rotation RaBitQ's error bound assumes: a uniformly random orthogonal
@@ -32,6 +31,7 @@ import (
 // what actually holds this number honest.
 // Rotation is the butterfly of Givens rotations RaBitQ applies.
 type Rotation struct {
+	seed  uint64
 	dims  int
 	pairs []simd.Pair
 }
@@ -43,11 +43,14 @@ func rotationRounds(dims int) int {
 	return 3 + bits.Len(uint(dims-1))
 }
 
-// newRotation derives the butterfly from a seed. Both the encoder and every
-// reader build the same one from the seed in the pack header, so the frame a
-// hood's bits live in is a property of the bytes, not of the process.
-func newRotation(seed uint64, dims int) *Rotation {
-	r := &Rotation{dims: dims}
+// NewRotation derives the butterfly for dims-wide vectors from a seed.
+// Both the encoder and every reader build the same one from the seed a
+// column records, so the frame a column's bits live in is a property of
+// the bytes, not of the process. A rotation is immutable and safe to share;
+// a caller builds one per (seed, dims) it serves and passes it to
+// Quantize, AppendRows and NewQuery.
+func NewRotation(seed uint64, dims int) *Rotation {
+	r := &Rotation{seed: seed, dims: dims}
 	if dims <= 1 {
 		return r
 	}
@@ -72,7 +75,13 @@ func newRotation(seed uint64, dims int) *Rotation {
 	return r
 }
 
-// apply rotates v in place. v must be r.dims long.
+// Seed is the seed r was derived from.
+func (r *Rotation) Seed() uint64 { return r.seed }
+
+// Dims is the width of the vectors r rotates.
+func (r *Rotation) Dims() int { return r.dims }
+
+// Apply rotates v in place. v must be r.dims long.
 func (r *Rotation) Apply(v []float32) {
 	_ = v[r.dims-1]
 	for _, p := range r.pairs {
@@ -91,26 +100,6 @@ func (r *Rotation) applyBlock(block []float32) {
 	if len(r.pairs) > 0 {
 		simd.RotatePairs(r.pairs, block)
 	}
-}
-
-// rotationFor caches one butterfly per (seed, dims). A namespace's hoods
-// share a seed, so a query that probes 98 of them builds nothing: the cache
-// is keyed by what the pack header says, and the number of distinct keys a
-// process ever sees is the number of (namespace, field) pairs it serves.
-var rotations sync.Map // rotationKey -> *Rotation
-
-type rotationKey struct {
-	seed uint64
-	dims int
-}
-
-func rotationFor(seed uint64, dims int) *Rotation {
-	key := rotationKey{seed, dims}
-	if r, ok := rotations.Load(key); ok {
-		return r.(*Rotation)
-	}
-	r, _ := rotations.LoadOrStore(key, newRotation(seed, dims))
-	return r.(*Rotation)
 }
 
 // Seed is the rotation seed a namespace's field uses: FNV-1a over the

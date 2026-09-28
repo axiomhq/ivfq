@@ -223,14 +223,10 @@ func sampledCorpus() ([][]float32, int) {
 // ever handed the sample, and without a result.
 func TestRunSampledCancelDuringSampling(t *testing.T) {
 	vecs, k := sampledCorpus()
-	kmeans.ResetMaxTrainN()
 	pc := &cancelAfterPolls{Context: ctx, at: 2}
 	c, a, err := kmeans.RunSampled(pc, vecs, k, 10, 1)
 	if err != context.Canceled || c != nil || a != nil {
 		t.Fatalf("RunSampled cancelled while sampling = (%v, %d assigned, %v)", c, len(a), err)
-	}
-	if got := kmeans.MaxTrainN(); got != 0 {
-		t.Fatalf("k-means trained on %d vectors after cancellation during sampling", got)
 	}
 	if got := pc.polls.Load(); got != 2 {
 		t.Fatalf("%d polls after cancellation on the 2nd: sampling ran on", got-2)

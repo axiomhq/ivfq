@@ -11,20 +11,20 @@ import (
 // and however many rows it holds.
 func TestReboundScorerReadsTheNewColumn(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
-		opts := Options{Dims: 129, Metric: metric, Seed: 11}
+		opts := Options{Metric: metric, Rotation: NewRotation(11, 129)}
 		centroid := corpus(1, 129)[0]
 		small, err := Empty(centroid, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if small, err = AppendRows(small, corpus(5, 129)); err != nil {
+		if small, err = AppendRows(small, opts.Rotation, corpus(5, 129)); err != nil {
 			t.Fatal(err)
 		}
 		big, err := Empty(centroid, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if big, err = AppendRows(big, corpus(64, 129)[5:]); err != nil {
+		if big, err = AppendRows(big, opts.Rotation, corpus(64, 129)[5:]); err != nil {
 			t.Fatal(err)
 		}
 		data, err := big.MarshalBinary()
@@ -35,7 +35,7 @@ func TestReboundScorerReadsTheNewColumn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		q := NewQuery(corpus(2, 129)[1], metric)
+		q := NewQuery(corpus(2, 129)[1], metric, opts.Rotation)
 		for _, target := range []Quantizer{big, bigBorrowed} {
 			if !small.SameFrame(&target) {
 				t.Fatalf("%s: columns are not in one frame", metric)

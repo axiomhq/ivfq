@@ -20,7 +20,7 @@ func TestRotationPreservesNorm(t *testing.T) {
 	for _, x := range v {
 		n0 += float64(x) * float64(x)
 	}
-	rotationFor(Seed("t", "r"), len(v)).Apply(v)
+	NewRotation(Seed("t", "r"), len(v)).Apply(v)
 	var n1 float64
 	for _, x := range v {
 		n1 += float64(x) * float64(x)

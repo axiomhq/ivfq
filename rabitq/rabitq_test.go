@@ -9,9 +9,12 @@ import (
 	"testing"
 )
 
-func bitOpts(metric ivfq.Metric) Options {
-	return Options{Metric: metric, Seed: Seed("ns", "vector")}
+func bitOpts(metric ivfq.Metric, dims int) Options {
+	return Options{Metric: metric, Rotation: NewRotation(Seed("ns", "vector"), dims)}
 }
+
+// rotOf is the rotation c was encoded in.
+func rotOf(c Quantizer) *Rotation { return NewRotation(c.Code.Seed, c.Dims) }
 
 func mustEncode(t *testing.T, vectors [][]float32, opts Options) Quantizer {
 	t.Helper()
@@ -26,7 +29,7 @@ func TestBitCodesBinaryRoundTrip(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(64, 33) // 33 dims: the last word is mostly padding
 		vectors[7] = make([]float32, 33)
-		want := mustEncode(t, vectors, bitOpts(metric))
+		want := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
 		if want.Rows() != len(vectors) || want.Dims != 33 {
 			t.Fatalf("%s: shape %d x %d", metric, want.Rows(), want.Dims)
 		}
@@ -42,7 +45,7 @@ func TestBitCodesBinaryRoundTrip(t *testing.T) {
 			t.Fatalf("%s round trip: %v", metric, err)
 		}
 		// An empty hood still publishes a shaped column.
-		empty := mustEncode(t, nil, Options{Dims: 8, Metric: metric, Seed: 7})
+		empty := mustEncode(t, nil, Options{Metric: metric, Rotation: NewRotation(7, 8)})
 		eb, err := empty.MarshalBinary()
 		if err != nil {
 			t.Fatal(err)
@@ -56,7 +59,7 @@ func TestBitCodesBinaryRoundTrip(t *testing.T) {
 func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(64, 129)
-		data, err := mustEncode(t, vectors, bitOpts(metric)).MarshalBinary()
+		data, err := mustEncode(t, vectors, bitOpts(metric, len(vectors[0]))).MarshalBinary()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +74,7 @@ func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 		if borrowed.Rows() != owned.Rows() || borrowed.Retained() != 0 {
 			t.Fatalf("%s borrowed rows=%d retained=%d", metric, borrowed.Rows(), borrowed.Retained())
 		}
-		q := NewQuery(vectors[3], metric)
+		q := NewQuery(vectors[3], metric, rotOf(owned))
 		for row := 0; row < borrowed.Rows(); row++ {
 			gotScore, gotBound := borrowed.ScoreAndBound(q, row)
 			wantScore, wantBound := owned.ScoreAndBound(q, row)
@@ -90,7 +93,7 @@ func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 // full vector is read, so bits the encoder could never write must not decode.
 func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 	vectors := corpus(4, 64)
-	b, err := mustEncode(t, vectors, bitOpts(ivfq.L2)).MarshalBinary()
+	b, err := mustEncode(t, vectors, bitOpts(ivfq.L2, len(vectors[0]))).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +141,7 @@ func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 	}
 	// 64 dims is a full word, so there is no padding to corrupt; check the
 	// padding rule where there IS padding.
-	pb, err := mustEncode(t, corpus(4, 33), bitOpts(ivfq.L2)).MarshalBinary()
+	pb, err := mustEncode(t, corpus(4, 33), bitOpts(ivfq.L2, 33)).MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,11 +163,11 @@ func TestBitEstimatorIsUnbiased(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(2000, 128)
 		queries := corpus(60, 128)
-		codes := mustEncode(t, vectors, bitOpts(metric))
+		codes := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
 		perQuery := make([]float64, len(queries))
 		var absSum, spread float64
 		for i, q := range queries {
-			s := codes.Scorer(NewQuery(q, metric))
+			s := codes.Scorer(NewQuery(q, metric, rotOf(codes)))
 			for row := range vectors {
 				exact := float64(ivfq.Score(metric, q, vectors[row]))
 				err := float64(s.Score(row)) - exact
@@ -219,14 +222,14 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 		{"axis-aligned", axis(3000, 128), axis(40, 128)},
 	} {
 		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
-			codes := mustEncode(t, tc.v, bitOpts(metric))
+			codes := mustEncode(t, tc.v, bitOpts(metric, len(tc.v[0])))
 			// Two settings of eps0 two orders of magnitude of tail apart:
 			// the shipped one, and a loose one where a miscalibrated bound
 			// would show up as a coverage that does not follow it.
 			for _, sigmas := range []float64{2, boundSigmas} {
 				var over, total int
 				for _, q := range tc.q {
-					query := NewQuery(q, metric)
+					query := NewQuery(q, metric, rotOf(codes))
 					query.Sigmas = sigmas
 					s := codes.Scorer(query)
 					for row := range tc.v {
@@ -261,7 +264,7 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 // survives, so a bound-pruned pass over them is exact again.
 func TestBitExactQueryBoundsNothing(t *testing.T) {
 	vectors := corpus(200, 64)
-	codes := mustEncode(t, vectors, Options{Metric: ivfq.L2, Seed: 3})
+	codes := mustEncode(t, vectors, Options{Metric: ivfq.L2, Rotation: NewRotation(3, len(vectors[0]))})
 	s := codes.Scorer(Query{Vector: vectors[0], Metric: ivfq.L2, Exact: true})
 	for row := range vectors {
 		if _, bound := s.ScoreAndBound(row); !math.IsInf(float64(bound), 1) {
@@ -289,13 +292,13 @@ func TestBitTwoPassRecallAndRows(t *testing.T) {
 			}
 		}
 		{
-			codes := mustEncode(t, vectors, bitOpts(metric))
+			codes := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
 			for _, mult := range []int{2, 5, 10} {
 				var seedRecall, twoPass, rows float64
 				for _, q := range queries {
 					exact := func(i int) float32 { return ivfq.Score(metric, q, vectors[i]) }
 					want := top(vectors, q, exact, 10)
-					s := codes.Scorer(NewQuery(q, metric))
+					s := codes.Scorer(NewQuery(q, metric, rotOf(codes)))
 					shortlist := top(vectors, q, s.Score, 10*mult)
 					seedRecall += recall(Rerank(shortlist, exact, 10), want)
 					seen := make(map[int]bool, len(shortlist))
@@ -328,12 +331,12 @@ func TestBitTwoPassRecallAndRows(t *testing.T) {
 func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 	vectors := corpus(8, 16)
 	vectors[3] = make([]float32, 16)
-	codes := mustEncode(t, vectors, bitOpts(ivfq.Cosine))
-	s := codes.Scorer(NewQuery(vectors[0], ivfq.Cosine))
+	codes := mustEncode(t, vectors, bitOpts(ivfq.Cosine, len(vectors[0])))
+	s := codes.Scorer(NewQuery(vectors[0], ivfq.Cosine, rotOf(codes)))
 	if score, bound := s.ScoreAndBound(3); score != 0 || bound != 0 {
 		t.Fatalf("zero row scored %v bound %v", score, bound)
 	}
-	zero := codes.Scorer(NewQuery(make([]float32, 16), ivfq.Cosine))
+	zero := codes.Scorer(NewQuery(make([]float32, 16), ivfq.Cosine, rotOf(codes)))
 	for row := range vectors {
 		if score, _ := zero.ScoreAndBound(row); score != 0 {
 			t.Fatalf("zero query scored row %d at %v", row, score)
@@ -346,13 +349,16 @@ func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 // zero would silently drop the whole index instead.
 func TestBitScorerBoundsNothingWhenItCannotScore(t *testing.T) {
 	vectors := corpus(16, 32)
-	l2 := mustEncode(t, vectors, bitOpts(ivfq.L2))
-	cosine := mustEncode(t, vectors, bitOpts(ivfq.Cosine))
+	l2 := mustEncode(t, vectors, bitOpts(ivfq.L2, len(vectors[0])))
+	cosine := mustEncode(t, vectors, bitOpts(ivfq.Cosine, len(vectors[0])))
 	for name, s := range map[string]Scorer{
-		"unsupported metric": l2.Scorer(NewQuery(vectors[0], ivfq.InnerProduct)),
-		"short query":        l2.Scorer(NewQuery(vectors[0][:8], ivfq.L2)),
-		"cosine query on l2": l2.Scorer(NewQuery(vectors[0], ivfq.Cosine)),
-		"l2 query on cosine": cosine.Scorer(NewQuery(vectors[0], ivfq.L2)),
+		"unsupported metric": l2.Scorer(NewQuery(vectors[0], ivfq.InnerProduct, rotOf(l2))),
+		"short query":        l2.Scorer(NewQuery(vectors[0][:8], ivfq.L2, rotOf(l2))),
+		"cosine query on l2": l2.Scorer(NewQuery(vectors[0], ivfq.Cosine, rotOf(l2))),
+		"l2 query on cosine": cosine.Scorer(NewQuery(vectors[0], ivfq.L2, rotOf(cosine))),
+		"no rotation":        l2.Scorer(Query{Vector: vectors[0], Metric: ivfq.L2}),
+		"other rotation":     l2.Scorer(NewQuery(vectors[0], ivfq.L2, NewRotation(l2.Code.Seed+1, l2.Dims))),
+		"narrower rotation":  l2.Scorer(NewQuery(vectors[0], ivfq.L2, NewRotation(l2.Code.Seed, l2.Dims-1))),
 	} {
 		score, bound := s.ScoreAndBound(3)
 		if score != 0 || !math.IsInf(float64(bound), 1) {
@@ -361,7 +367,7 @@ func TestBitScorerBoundsNothingWhenItCannotScore(t *testing.T) {
 	}
 	// A zero cosine query is different: every score really IS 0, so 0 is a
 	// sound bound and the rerank can skip on it.
-	zero := cosine.Scorer(NewQuery(make([]float32, 32), ivfq.Cosine))
+	zero := cosine.Scorer(NewQuery(make([]float32, 32), ivfq.Cosine, rotOf(cosine)))
 	if score, bound := zero.ScoreAndBound(3); score != 0 || bound != 0 {
 		t.Fatalf("zero cosine query: scored %v bound %v, want 0 and 0", score, bound)
 	}
@@ -377,10 +383,10 @@ func TestRotationIsReproducibleAndOrthogonal(t *testing.T) {
 	a, b := make([]float32, dims), make([]float32, dims)
 	copy(a, v)
 	copy(b, v)
-	newRotation(1234, dims).Apply(a)
-	rotationFor(1234, dims).Apply(b)
+	NewRotation(1234, dims).Apply(a)
+	NewRotation(1234, dims).Apply(b)
 	if !reflect.DeepEqual(a, b) {
-		t.Fatal("the cached rotation is not the seeded one")
+		t.Fatal("two rotations from one seed differ")
 	}
 	norm := func(x []float32) float64 {
 		var n float64
@@ -394,7 +400,7 @@ func TestRotationIsReproducibleAndOrthogonal(t *testing.T) {
 	}
 	c := make([]float32, dims)
 	copy(c, v)
-	rotationFor(1235, dims).Apply(c)
+	NewRotation(1235, dims).Apply(c)
 	if reflect.DeepEqual(a, c) {
 		t.Fatal("two seeds gave one rotation")
 	}
@@ -402,7 +408,7 @@ func TestRotationIsReproducibleAndOrthogonal(t *testing.T) {
 	// a coordinate vector.
 	e := make([]float32, dims)
 	e[0] = 1
-	rotationFor(7, dims).Apply(e)
+	NewRotation(7, dims).Apply(e)
 	spread := 0
 	for _, x := range e {
 		if math.Abs(float64(x)) > 0.01 {
@@ -417,12 +423,12 @@ func TestRotationIsReproducibleAndOrthogonal(t *testing.T) {
 func BenchmarkBitScore(b *testing.B) {
 	v := corpus(10000, 128)
 	q := v[0]
-	c, err := Quantize(v, Options{Metric: ivfq.L2, Seed: 11})
+	c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: NewRotation(11, 128)})
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.Run("1bit", func(b *testing.B) {
-		pq := NewQuery(q, ivfq.L2)
+		pq := NewQuery(q, ivfq.L2, rotOf(c))
 		for b.Loop() {
 			s := c.Scorer(pq)
 			for i := range v {

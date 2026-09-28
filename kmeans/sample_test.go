@@ -18,10 +18,20 @@ func TestRunSampledBoundsTraining(t *testing.T) {
 		}
 		vecs[i] = v
 	}
-	ResetMaxTrainN()
 	centroids, assign, _ := RunSampled(context.Background(), vecs, k, 10, 1)
-	if got, want := MaxTrainN(), SampleSize(k); got != want {
-		t.Fatalf("k-means trained on %d vectors, want exactly SampleSize(%d) = %d (n = %d)", got, k, want, n)
+	// RunSampled hands Lloyd's exactly sample(SampleSize(k)) and nothing
+	// else: the centroids are the fit over that sample, bit for bit.
+	trained, err := sample(context.Background(), vecs, SampleSize(k), 1)
+	if err != nil || len(trained) != SampleSize(k) {
+		t.Fatalf("sample = %d rows, %v; want SampleSize(%d) = %d", len(trained), err, k, SampleSize(k))
+	}
+	fit, _, _ := Run(context.Background(), trained, k, 10, 1)
+	for i := range centroids {
+		for d := range centroids[i] {
+			if centroids[i][d] != fit[i][d] {
+				t.Fatalf("RunSampled centroid %d dim %d = %v, fit over the sample = %v", i, d, centroids[i][d], fit[i][d])
+			}
+		}
 	}
 	if len(centroids) != k || len(assign) != n {
 		t.Fatalf("centroids=%d assign=%d, want %d and %d", len(centroids), len(assign), k, n)
@@ -39,13 +49,9 @@ func TestRunSampledBoundsTraining(t *testing.T) {
 		}
 	}
 	// A corpus the sample already covers gets the full fit, unchanged.
-	ResetMaxTrainN()
 	small := vecs[:SampleSize(k)]
 	got, _, _ := RunSampled(context.Background(), small, k, 10, 1)
 	want, _, _ := Run(context.Background(), small, k, 10, 1)
-	if MaxTrainN() != len(small) {
-		t.Fatalf("sample >= corpus must train on all %d, trained on %d", len(small), MaxTrainN())
-	}
 	for i := range got {
 		for d := range got[i] {
 			if got[i][d] != want[i][d] {

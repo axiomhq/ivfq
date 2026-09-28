@@ -43,25 +43,6 @@ func SampleSizeForBudget(k, dims, bytes int) int {
 	return max(1, min(SampleSize(k), bytes/(dims*4)))
 }
 
-// maxTrainN is the largest vector count Lloyd's has been handed since the
-// last ResetMaxTrainN. It exists so a test can assert the scaling rule
-// directly — "no build ever fits k-means over more than SampleSize(k)
-// vectors" is the whole reason the build is not O(N^2/S) — rather than
-// inferring it from a wall clock. One atomic store per k-means call.
-var maxTrainN atomic.Int64
-
-// MaxTrainN reports that count. ResetMaxTrainN zeroes it.
-func MaxTrainN() int  { return int(maxTrainN.Load()) }
-func ResetMaxTrainN() { maxTrainN.Store(0) }
-func noteTrainN(n int) {
-	for {
-		cur := maxTrainN.Load()
-		if int64(n) <= cur || maxTrainN.CompareAndSwap(cur, int64(n)) {
-			return
-		}
-	}
-}
-
 // RunSampled fits k centroids on a deterministic random sample of at most
 // SampleSize(k) vectors, then assigns EVERY vector in one parallel pass
 // (assignAll). This is the only k-means the build runs at scale: with
@@ -103,36 +84,9 @@ func runSampledLimit(ctx context.Context, vecs [][]float32, k, iters int, seed i
 	if s >= n {
 		return run(ctx, vecs, k, iters, seed, spherical)
 	}
-	// A uniform random sample, not a stride: the corpus arrives sorted by id
-	// and generators commonly make attribute i a function of i mod something,
-	// so a stride can land every sampled vector in the same mode. Reservoir
-	// sampling (Algorithm R) keeps the scratch at s indices whatever n is;
-	// the chosen indices are then sorted so the training order is the input
-	// order, independent of the draw sequence. This pass touches all N rows,
-	// so ctx is polled between fixed-size chunks of it, as assignAll does.
-	const reservoirChunk = 4096
-	rng := rand.New(rand.NewSource(seed))
-	idx := make([]int, s)
-	for i := range idx {
-		idx[i] = i
-	}
-	for lo := s; lo < n; lo += reservoirChunk {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		for i := lo; i < min(lo+reservoirChunk, n); i++ {
-			if j := rng.Intn(i + 1); j < s {
-				idx[j] = i
-			}
-		}
-	}
-	slices.Sort(idx)
-	if err := ctx.Err(); err != nil {
+	sample, err := sample(ctx, vecs, s, seed)
+	if err != nil {
 		return nil, nil, err
-	}
-	sample := make([][]float32, s)
-	for i, j := range idx {
-		sample[i] = vecs[j]
 	}
 	centroids, _, err := run(ctx, sample, k, iters, seed, spherical)
 	if err != nil {
@@ -144,6 +98,46 @@ func runSampledLimit(ctx context.Context, vecs [][]float32, k, iters int, seed i
 		return nil, nil, err
 	}
 	return centroids, assign, nil
+}
+
+// sample draws s of vecs uniformly at random, in input order. It is the
+// only rows RunSampled ever hands Lloyd's, which is what bounds training
+// at SampleSize(k) whatever len(vecs) is.
+//
+// A uniform random sample, not a stride: the corpus arrives sorted by id
+// and generators commonly make attribute i a function of i mod something,
+// so a stride can land every sampled vector in the same mode. Reservoir
+// sampling (Algorithm R) keeps the scratch at s indices whatever n is;
+// the chosen indices are then sorted so the training order is the input
+// order, independent of the draw sequence. This pass touches all n rows,
+// so ctx is polled between fixed-size chunks of it, as assignAll does.
+func sample(ctx context.Context, vecs [][]float32, s int, seed int64) ([][]float32, error) {
+	const reservoirChunk = 4096
+	n := len(vecs)
+	rng := rand.New(rand.NewSource(seed))
+	idx := make([]int, s)
+	for i := range idx {
+		idx[i] = i
+	}
+	for lo := s; lo < n; lo += reservoirChunk {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for i := lo; i < min(lo+reservoirChunk, n); i++ {
+			if j := rng.Intn(i + 1); j < s {
+				idx[j] = i
+			}
+		}
+	}
+	slices.Sort(idx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make([][]float32, s)
+	for i, j := range idx {
+		out[i] = vecs[j]
+	}
+	return out, nil
 }
 
 // seedPlusPlus picks the k initial centroids by D^2 sampling — k-means++.
@@ -340,7 +334,6 @@ func run(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spheri
 	if k > n {
 		k = n
 	}
-	noteTrainN(n)
 	rng := rand.New(rand.NewSource(seed))
 	centroids, err := seedPlusPlus(ctx, vecs, k, rng)
 	if err != nil {

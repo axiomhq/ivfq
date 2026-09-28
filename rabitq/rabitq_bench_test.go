@@ -15,7 +15,7 @@ func BenchmarkQuantizeL2(b *testing.B) {
 		}
 		vectors[i] = v
 	}
-	opts := Options{Dims: dims, Metric: ivfq.L2, Seed: 3}
+	opts := Options{Metric: ivfq.L2, Rotation: NewRotation(3, dims)}
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := Quantize(vectors, opts); err != nil {

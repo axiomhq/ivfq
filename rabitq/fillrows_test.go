@@ -36,7 +36,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 				if rows > 2 {
 					vectors[1] = slices.Clone(vectors[2]) // duplicates pull a row onto the mean when rows == 2
 				}
-				got, err := quantizeBits(vectors, dims, metric, 11)
+				got, err := quantizeBits(vectors, metric, NewRotation(11, dims))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -44,7 +44,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 				want.Words = make([]uint64, len(want.Words))
 				want.Norms = make([]float32, len(want.Norms))
 				want.Aligns = slices.Clone(got.Code.Aligns)
-				rot := rotationFor(11, dims)
+				rot := NewRotation(11, dims)
 				scratch := make([]float32, dims)
 				for i, v := range vectors {
 					row := workRow(v, metric == ivfq.Cosine)
@@ -61,7 +61,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 		}
 	}
 	// A hood of one row: the row is its own centroid, zero norm, no bits.
-	q, err := quantizeBits([][]float32{{1, 2, 3}}, 3, ivfq.L2, 5)
+	q, err := quantizeBits([][]float32{{1, 2, 3}}, ivfq.L2, NewRotation(5, 3))
 	if err != nil || q.Code.Norms[0] != 0 || q.Code.Aligns[0] != 0 || q.Code.Words[0] != 0 {
 		t.Fatalf("single row: %+v %v", q.Code, err)
 	}
@@ -75,7 +75,7 @@ func bitsEqual(a, b []float32) bool {
 func TestRotatePairsMatchesApply(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
 	for _, dims := range []int{2, 17, 128} {
-		rot := newRotation(99, dims)
+		rot := NewRotation(99, dims)
 		rows := make([][]float32, simd.FillBlock)
 		block := make([]float32, dims*simd.FillBlock)
 		for r := range rows {

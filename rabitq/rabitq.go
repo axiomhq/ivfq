@@ -163,7 +163,8 @@ func (b *Code) word(i int) uint64 {
 // metric decides whether the rows are normalized first; seed is the
 // rotation. An empty corpus still produces a valid, zero-row payload,
 // because a hood may legitimately hold only tombstones.
-func quantizeBits(vectors [][]float32, dims int, metric ivfq.Metric, seed uint64) (Quantizer, error) {
+func quantizeBits(vectors [][]float32, metric ivfq.Metric, rot *Rotation) (Quantizer, error) {
+	dims, seed := rot.dims, rot.seed
 	if metric != ivfq.L2 && metric != ivfq.Cosine {
 		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", metric)
 	}
@@ -212,7 +213,7 @@ func quantizeBits(vectors [][]float32, dims int, metric ivfq.Metric, seed uint64
 			b.Centroid[j] = float32(sum[j] / float64(members))
 		}
 	}
-	b.fillRows(work, rotationFor(seed, dims))
+	b.fillRows(work, rot)
 	return Quantizer{Dims: dims, Code: b}, nil
 }
 
@@ -564,7 +565,8 @@ func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 	// a case). Each one scores nothing and, crucially, BOUNDS nothing: the
 	// bound pass then reads every row and the answer is still right, just
 	// slow. A bound of zero here would silently prune the whole index.
-	if (!s.l2 && q.Metric != ivfq.Cosine) || len(q.Vector) < d || b.Unit != (q.Metric == ivfq.Cosine) {
+	if (!s.l2 && q.Metric != ivfq.Cosine) || len(q.Vector) < d || b.Unit != (q.Metric == ivfq.Cosine) ||
+		q.Rotation == nil || q.Rotation.seed != b.Seed || q.Rotation.dims != d {
 		s.dead, s.exact = true, true
 		return s
 	}
@@ -585,7 +587,7 @@ func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 		resid[j] -= b.centroid(j)
 		n += float64(resid[j]) * float64(resid[j])
 	}
-	rotationFor(b.Seed, d).Apply(resid)
+	q.Rotation.Apply(resid)
 	s.qNorm = math.Sqrt(n)
 	if s.qNorm == 0 {
 		return s // the query IS the centroid: every row's distance is its own norm
