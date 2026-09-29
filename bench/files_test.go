@@ -11,43 +11,6 @@ import (
 	"testing"
 )
 
-func TestReadFvecs(t *testing.T) {
-	// two vectors, dims=3, little-endian: [d][f f f][d][f f f]
-	var buf bytes.Buffer
-	for _, v := range [][]float32{{1, 2, 3}, {4, 5, 6}} {
-		binary.Write(&buf, binary.LittleEndian, int32(3))
-		binary.Write(&buf, binary.LittleEndian, v)
-	}
-	p := filepath.Join(t.TempDir(), "t.fvecs")
-	os.WriteFile(p, buf.Bytes(), 0o644)
-	got, err := ReadFvecs(p)
-	if err != nil || len(got) != 2 || !reflect.DeepEqual(got[1], []float32{4, 5, 6}) {
-		t.Fatalf("got %v err %v", got, err)
-	}
-	// truncated trailing record must error, not silently succeed
-	os.WriteFile(p, buf.Bytes()[:len(buf.Bytes())-4], 0o644)
-	if _, err := ReadFvecs(p); err == nil {
-		t.Fatal("truncated file: want error")
-	}
-}
-
-func TestReadIvecs(t *testing.T) {
-	var buf bytes.Buffer
-	for _, v := range [][]int32{{7, 8}, {9, 10}} {
-		binary.Write(&buf, binary.LittleEndian, int32(2))
-		binary.Write(&buf, binary.LittleEndian, v)
-	}
-	p := filepath.Join(t.TempDir(), "t.ivecs")
-	os.WriteFile(p, buf.Bytes(), 0o644)
-	if got, err := ReadIvecs(p); err != nil || !reflect.DeepEqual(got, [][]int32{{7, 8}, {9, 10}}) {
-		t.Fatalf("got %v err %v", got, err)
-	}
-	os.WriteFile(p, buf.Bytes()[:len(buf.Bytes())-4], 0o644)
-	if _, err := ReadIvecs(p); err == nil {
-		t.Fatal("truncated file: want error")
-	}
-}
-
 func writeBin(t *testing.T, name string, rows, dims uint32, values any) string {
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.LittleEndian, [2]uint32{rows, dims})

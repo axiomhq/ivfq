@@ -18,7 +18,7 @@ clusters, the codes and the scan.
 | `late` | late-interaction scoring of multi-vector documents |
 | `sparse` | the string-keyed sparse vector |
 | `codec` | f16 and int8 row storage |
-| `bench` | ANN corpus readers and measurement helpers |
+| `bench` | Big ANN corpus readers and recall@k |
 
 No I/O anywhere but `bench`.
 
@@ -65,12 +65,12 @@ per-cluster counts and radii. No rule ever touches every row.
 
 ## Benchmark data
 
-`bench` reads the standard ANN corpora and measures a run. Stdlib only.
+`bench` reads the Big ANN corpora and scores recall. Stdlib only.
 
-1. Read a corpus: `bench.ReadFvecs(path)` for texmex `.fvecs`, or `b, err := bench.OpenBin(path)` then `b.Next(n)` in batches for Big ANN `.u8bin`/`.fbin`.
-2. Read the ground truth: `bench.ReadIvecs(path)` for `.ivecs`, `bench.ReadGroundTruth(path)` for `.ibin`.
+1. Read a corpus: `b, err := bench.OpenBin(path)`, then `b.Next(n)` in batches for `.u8bin`/`.fbin`.
+2. Read the ground truth: `bench.ReadGroundTruth(path)` for `.ibin`.
 3. Score: `bench.RecallAtK(got, truth, 10)`.
-4. Measure: `bench.Summary("query", latencies)` prints p50/p95/p99/mean; `m := bench.StartMemPeak()` ... `m.Close()` keeps peak `Sys`, `Heap` and `RSS`.
+4. CPU time: `bench.CPUSeconds()` before and after a run.
 
 ## Kernels
 

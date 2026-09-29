@@ -1,4 +1,4 @@
-// Package bench reads ANN benchmark corpora and ground truth (texmex
-// .fvecs/.ivecs, Big ANN .u8bin/.fbin/.ibin), scores recall@k, and measures
-// latency quantiles, peak memory, CPU time and CPU profiles. Stdlib only.
+// Package bench reads Big ANN benchmark corpora and ground truth
+// (.u8bin/.fbin/.ibin), scores recall@k, and reads process CPU time.
+// Stdlib only.
 package bench
