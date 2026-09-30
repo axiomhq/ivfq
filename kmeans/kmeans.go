@@ -77,6 +77,10 @@ const SplitIters = 8
 // its error and no result: checked at every seeding step, every Lloyd
 // iteration, and every assignment chunk. The result is bit-identical
 // whatever GOMAXPROCS is.
+//
+// Above TwoLevelK the fit is two-level (see TwoLevelK): same inputs, same
+// guarantees, except that assign is the nearest centroid within the
+// vector's nearest few coarse buckets rather than over all K.
 func (c Config) Fit(ctx context.Context, vecs [][]float32) ([][]float32, []int, error) {
 	k, iters, seed, spherical, bytes := c.K, c.Iters, c.Seed, c.Spherical, c.MaxBytes
 	n := len(vecs)
@@ -90,6 +94,15 @@ func (c Config) Fit(ctx context.Context, vecs [][]float32) ([][]float32, []int, 
 		k = n
 	}
 	s := SampleSizeForBudget(k, len(vecs[0]), bytes)
+	if k > TwoLevelK {
+		return fitTwoLevel(ctx, vecs, s, k, iters, seed, spherical)
+	}
+	return fitFlat(ctx, vecs, s, k, iters, seed, spherical)
+}
+
+// fitFlat is Fit at or below TwoLevelK: Lloyd's over all k on the sample.
+func fitFlat(ctx context.Context, vecs [][]float32, s, k, iters int, seed int64, spherical bool) ([][]float32, []int, error) {
+	n := len(vecs)
 	if s >= n {
 		return run(ctx, vecs, k, iters, seed, spherical)
 	}
@@ -351,7 +364,16 @@ func run(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spheri
 			simd.Normalize(c)
 		}
 	}
-	assign := make([]int, n)
+	return lloyd(ctx, vecs, centroids, make([]int, n), iters, spherical, func(assign []int) bool {
+		return assignAll(ctx, centroids, vecs, assign)
+	})
+}
+
+// lloyd runs up to iters Lloyd iterations from centroids (updated in place)
+// and assign (the assignment step's starting point, updated in place) with
+// assignFn as the assignment step, then one last assignment.
+func lloyd(ctx context.Context, vecs, centroids [][]float32, assign []int, iters int, spherical bool, assignFn func([]int) bool) ([][]float32, []int, error) {
+	k := len(centroids)
 	dims := len(vecs[0])
 	sums := make([]float64, k*dims) // row c is centroid c's accumulator
 	counts := make([]int, k)
@@ -359,7 +381,7 @@ func run(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spheri
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		changed := assignAll(ctx, centroids, vecs, assign)
+		changed := assignFn(assign)
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
@@ -401,7 +423,7 @@ func run(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spheri
 			break
 		}
 	}
-	assignAll(ctx, centroids, vecs, assign)
+	assignFn(assign)
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -430,13 +452,19 @@ const parallelMin = 1 << 16
 // order — floating-point k-means is only ever reproducible against a fixed
 // kernel.
 func assignAll(ctx context.Context, centroids, vecs [][]float32, assign []int) bool {
+	return assignWith(ctx, len(vecs), assign, len(centroids), func(i int) int { return Nearest(centroids, vecs[i]) })
+}
+
+// assignWith is assignAll for any nearest-centroid rule: assign[i] =
+// nearest(i) for i < n, which may read assign[i] before it is replaced.
+// work is the distance calls one vector costs, for the serial cutoff.
+func assignWith(ctx context.Context, n int, assign []int, work int, nearest func(int) int) bool {
 	const chunk = 256
-	n := len(vecs)
 	workers := min(runtime.GOMAXPROCS(0), n)
-	if workers < 2 || n*len(centroids) < parallelMin {
+	if workers < 2 || n*work < parallelMin {
 		changed := false
 		for lo := 0; lo < n && ctx.Err() == nil; lo += chunk {
-			if assignRange(centroids, vecs, assign, lo, min(lo+chunk, n)) {
+			if assignRange(nearest, assign, lo, min(lo+chunk, n)) {
 				changed = true
 			}
 		}
@@ -454,7 +482,7 @@ func assignAll(ctx context.Context, centroids, vecs [][]float32, assign []int) b
 				if lo >= n {
 					return
 				}
-				if assignRange(centroids, vecs, assign, lo, min(lo+chunk, n)) {
+				if assignRange(nearest, assign, lo, min(lo+chunk, n)) {
 					changed.Store(true)
 				}
 			}
@@ -464,10 +492,10 @@ func assignAll(ctx context.Context, centroids, vecs [][]float32, assign []int) b
 	return changed.Load()
 }
 
-func assignRange(centroids, vecs [][]float32, assign []int, lo, hi int) bool {
+func assignRange(nearest func(int) int, assign []int, lo, hi int) bool {
 	changed := false
 	for i := lo; i < hi; i++ {
-		if c := Nearest(centroids, vecs[i]); c != assign[i] {
+		if c := nearest(i); c != assign[i] {
 			assign[i] = c
 			changed = true
 		}

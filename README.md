@@ -12,7 +12,7 @@ clusters, the codes and the scan.
 | package | what it holds |
 | --- | --- |
 | `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid `Tree`, the centroid codec, and the distance vocabulary (`Metric`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
-| `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass |
+| `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids |
 | `rabitq` | 1-bit RaBitQ codes: `Quantize`, `Quantizer`, `Scorer`, `Rotation` |
 | `rank` | top-k selection and reciprocal rank fusion |
 | `late` | late-interaction scoring of multi-vector documents |
@@ -34,7 +34,10 @@ codes, err := rabitq.Quantize(rowsOfCluster, rabitq.Options{Metric: ivfq.L2, Rot
 
 `Fit` trains on a sample of at most `kmeans.SampleSize(k)` rows and assigns
 every row in one parallel pass; the result is bit-identical whatever
-`GOMAXPROCS` is. To route rows later, `s := tree.NewSearcher()` then
+`GOMAXPROCS` is. Above `kmeans.TwoLevelK` (512) it fits √k coarse
+centroids, then k fine ones under them, and each row searches only its
+16 nearest coarse centroids' fine ones: about 17·√k distances per row,
+not k. To route rows later, `s := tree.NewSearcher()` then
 `s.Assign(row, beam)`, one `Searcher` per goroutine. One bit per dimension
 plus two float32 per row.
 

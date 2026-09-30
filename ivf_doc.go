@@ -21,8 +21,10 @@ package ivfq
 // SampleSize(k) vectors (32 per centroid, floored at 4,096, measured within
 // 1.03x of the full fit's MSE), seeds them with greedy k-means++, and
 // assigns all N in one parallel pass, so a build costs O(SampleSize(k) x k
-// x dims) to train plus O(N x k x dims) to assign. Every vector lands in
-// exactly one cluster.
+// x dims) to train plus O(N x k x dims) to assign. Above kmeans.TwoLevelK
+// it fits √k coarse centroids first and k fine ones under them, so both
+// terms drop to about √k in place of k. Every vector lands in exactly one
+// cluster.
 //
 // After the build nothing in this package asks for a pass over N. Policy
 // and MergeTarget are stated entirely on []ClusterStat, the per-cluster
