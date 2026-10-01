@@ -263,9 +263,10 @@ func TestUpsertAllAfterSplit(t *testing.T) {
 	if err := applied.ApplyCentroidDeltas([][]CentroidUpsert{{{ID: k + 5, Vec: split[0]}}}); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("gap into a tree: %v, want ErrCorrupt", err)
 	}
-	// A merge renumbers slots: no upsert, the caller builds.
-	if _, ok := tree.UpsertAll(published[:k-1], limit); ok {
-		t.Fatal("UpsertAll accepted a set with a slot removed")
+	// A shorter set cuts the tree: the leaves are the set's.
+	cut, ok := tree.UpsertAll(published[:k-1], limit)
+	if !ok || cut.Leaves() != k-1 || tree.Leaves() != k {
+		t.Fatalf("UpsertAll of a set one shorter: ok %v, %d leaves, original %d", ok, cut.Leaves(), tree.Leaves())
 	}
 	// Unchanged: the tree itself.
 	if same, ok := tree.UpsertAll(published, limit); !ok || same != &tree {
@@ -312,5 +313,79 @@ func TestCentroidAndMeanDistance(t *testing.T) {
 	}
 	if r := MeanDistance([][]float32{{1}}, []float32{0, 0}); r != 0 {
 		t.Fatalf("no matching rows: %v", r)
+	}
+}
+
+// TestCentroidDeltaDropsBySwap: dropping a cluster by moving the last one
+// into its slot is a two-entry delta (that upsert and a cut), not a full
+// set; it round-trips, applies to the flat set and to the tree alike, and
+// the cut tree routes like a fresh Build of the smaller set, never to the
+// cut slot.
+func TestCentroidDeltaDropsBySwap(t *testing.T) {
+	const k, dims, drop = 2000, 16, 37
+	published, _ := splitSet(k, dims)
+	next := slices.Clone(published)
+	next[drop] = next[k-1]
+	next = next[:k-1]
+	limit := max(2, k/16)
+	d, ok := CentroidDelta(published, next, limit)
+	if !ok || len(d) != 2 || d[0].ID != drop || d[1].ID != k-1 || d[1].Vec != nil {
+		t.Fatalf("delta %v (ok %v): want the swap's upsert and a cut to %d", d, ok, k-1)
+	}
+	back, err := DecodeCentroidDelta(EncodeCentroidDelta(d), dims)
+	if err != nil || len(back) != 2 || back[1].Vec != nil || back[1].ID != k-1 || !slices.Equal(back[0].Vec, d[0].Vec) {
+		t.Fatalf("round trip: %v %v", back, err)
+	}
+	flat, err := ApplyCentroidDeltas(published, back)
+	if err != nil || len(flat) != k-1 {
+		t.Fatalf("flat apply: %d slots, %v", len(flat), err)
+	}
+	for i := range next {
+		if !slices.Equal(flat[i], next[i]) {
+			t.Fatalf("flat slot %d differs", i)
+		}
+	}
+	tree, err := Build(context.Background(), published, splitTestFanout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := tree.Clone()
+	if err := applied.ApplyCentroidDeltas([][]CentroidUpsert{back}); err != nil || applied.Leaves() != k-1 {
+		t.Fatalf("tree apply: %d leaves, %v", applied.Leaves(), err)
+	}
+	for i := range next {
+		if !slices.Equal(applied.Leaf(i), next[i]) {
+			t.Fatalf("tree leaf %d differs", i)
+		}
+	}
+	fresh, err := Build(context.Background(), next, splitTestFanout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutA, freshA := treeAssigner(&applied, next), treeAssigner(&fresh, next)
+	rng := rand.New(rand.NewSource(11))
+	differ := 0
+	for n := range 5000 {
+		base := published[rng.Intn(k)]
+		if n%4 == 0 {
+			base = published[drop] // the dropped cluster's own region
+		}
+		v := make([]float32, dims)
+		for j := range v {
+			v[j] = base[j] + float32(rng.NormFloat64()*0.5)
+		}
+		got := cutA(v)
+		if got < 0 || got >= k-1 {
+			t.Fatalf("routed to slot %d of %d", got, k-1)
+		}
+		if got != freshA(v) {
+			differ++
+		}
+	}
+	if differ != 0 {
+		t.Fatalf("%d of 5000 rows routed differently from a fresh Build", differ)
+	}
+	if err := applied.Truncate(k); err == nil {
+		t.Fatal("a truncate past the leaves was accepted")
 	}
 }

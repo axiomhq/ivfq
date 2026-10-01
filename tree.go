@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/axiomhq/ivfq/kmeans"
 	"math"
+	"slices"
 )
 
 type treeNode struct {
@@ -701,6 +702,41 @@ func (t *Tree) Upsert(id int, v []float32) error {
 		return nil
 	}
 	t.appendLeaf(v)
+	return nil
+}
+
+// Truncate cuts the tree to its first n leaves: each later leaf leaves its
+// holder, which gets a fresh block of the leaves it keeps (holder blocks
+// are sub-slices of one arena, as in appendLeaf). Internal centroids stay,
+// as they do under Upsert, and a holder may be left empty; the next Build
+// rebalances.
+func (t *Tree) Truncate(n int) error {
+	if n < 0 || n > len(t.leaves) {
+		return fmt.Errorf("ivf: truncate to %d of %d leaves", n, len(t.leaves))
+	}
+	if n == len(t.leaves) {
+		return nil
+	}
+	for i := range t.nodes {
+		h := &t.nodes[i]
+		if len(h.children) > 0 || !slices.ContainsFunc(h.leaves, func(id int) bool { return id >= n }) {
+			continue
+		}
+		var leaves []int
+		var norms, blk []float32
+		for j, id := range h.leaves {
+			if id < n {
+				leaves, norms = append(leaves, id), append(norms, h.norms[j])
+				blk = append(blk, t.leaves[id]...)
+			}
+		}
+		h.leaves, h.norms, h.block = leaves, norms, blk
+		for j, id := range leaves {
+			t.leaves[id] = blk[j*t.dims : (j+1)*t.dims : (j+1)*t.dims]
+		}
+	}
+	clear(t.leaves[n:])
+	t.leaves = t.leaves[:n]
 	return nil
 }
 

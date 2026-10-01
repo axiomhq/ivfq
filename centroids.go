@@ -59,14 +59,19 @@ func DecodeCentroids(data []byte, dims int) ([][]float32, error) {
 
 // CentroidUpsert is one entry of a centroid delta: the vector now at slot
 // ID, which is either an existing slot (a recentred cluster) or one past the
-// last (a cluster a split added). Slots never move or vanish through a delta;
-// a change that drops or reorders clusters writes a full set instead.
+// last (a cluster a split added), or, with a nil Vec, the set cut to its
+// first ID slots (the last entry of a delta, after its upserts). A caller
+// that drops a cluster moves the last one into its slot and cuts the end,
+// so a merge is two entries and not a full set.
 type CentroidUpsert struct {
 	ID  int
 	Vec []float32
 }
 
 const centroidDeltaMagic = "DCD\x01"
+
+// deltaTruncate marks an entry's slot word as a truncation (no vector).
+const deltaTruncate = 1 << 31
 
 // EncodeCentroidDelta writes upserts as: magic, dims, count, then per entry
 // the slot and the vector. The dims are carried so a delta applied to the
@@ -75,12 +80,19 @@ func EncodeCentroidDelta(entries []CentroidUpsert) []byte {
 	var buf bytes.Buffer
 	buf.WriteString(centroidDeltaMagic)
 	dims := 0
-	if len(entries) > 0 {
-		dims = len(entries[0].Vec)
+	for _, e := range entries {
+		if e.Vec != nil {
+			dims = len(e.Vec)
+			break
+		}
 	}
 	binary.Write(&buf, binary.LittleEndian, uint32(dims))
 	binary.Write(&buf, binary.LittleEndian, uint32(len(entries)))
 	for _, e := range entries {
+		if e.Vec == nil {
+			binary.Write(&buf, binary.LittleEndian, uint32(e.ID)|deltaTruncate)
+			continue
+		}
 		binary.Write(&buf, binary.LittleEndian, uint32(e.ID))
 		binary.Write(&buf, binary.LittleEndian, e.Vec)
 	}
@@ -105,7 +117,7 @@ func DecodeCentroidDelta(data []byte, dims int) ([]CentroidUpsert, error) {
 	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
 		return nil, fmt.Errorf("%w: centroid delta: %v", ErrCorrupt, err)
 	}
-	if count > 0 && int(stored) != dims {
+	if stored != 0 && int(stored) != dims {
 		return nil, fmt.Errorf("%w: centroid delta is %d-wide, field is %d-wide", ErrCorrupt, stored, dims)
 	}
 	var out []CentroidUpsert
@@ -113,6 +125,10 @@ func DecodeCentroidDelta(data []byte, dims int) ([]CentroidUpsert, error) {
 		var id uint32
 		if err := binary.Read(r, binary.LittleEndian, &id); err != nil {
 			return nil, fmt.Errorf("%w: centroid delta: %v", ErrCorrupt, err)
+		}
+		if id&deltaTruncate != 0 {
+			out = append(out, CentroidUpsert{ID: int(id &^ deltaTruncate)})
+			continue
 		}
 		v := make([]float32, dims)
 		if err := binary.Read(r, binary.LittleEndian, v); err != nil {
@@ -136,6 +152,8 @@ func ApplyCentroidDeltas(base [][]float32, deltas ...[]CentroidUpsert) ([][]floa
 			switch {
 			case e.ID < 0 || e.ID > len(out):
 				return nil, fmt.Errorf("%w: centroid delta slot %d past %d slots", ErrCorrupt, e.ID, len(out))
+			case e.Vec == nil:
+				out = out[:e.ID:e.ID]
 			case e.ID == len(out):
 				out = append(out, e.Vec)
 			default:
@@ -153,7 +171,7 @@ func ApplyCentroidDeltas(base [][]float32, deltas ...[]CentroidUpsert) ([][]floa
 // qualifies. ok=false means write a full set: slots moved or vanished, or
 // more than limit changed.
 func CentroidDelta(prev, next [][]float32, limit int) ([]CentroidUpsert, bool) {
-	if len(prev) == 0 || len(next) < len(prev) {
+	if len(prev) == 0 || len(next) == 0 {
 		return nil, false
 	}
 	var out []CentroidUpsert
@@ -166,6 +184,9 @@ func CentroidDelta(prev, next [][]float32, limit int) ([]CentroidUpsert, bool) {
 		}
 		out = append(out, CentroidUpsert{ID: i, Vec: v})
 	}
+	if len(next) < len(prev) {
+		out = append(out, CentroidUpsert{ID: len(next)})
+	}
 	return out, true
 }
 
@@ -173,7 +194,13 @@ func CentroidDelta(prev, next [][]float32, limit int) ([]CentroidUpsert, bool) {
 func (t *Tree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
 	for _, d := range deltas {
 		for _, e := range d {
-			if err := t.Upsert(e.ID, e.Vec); err != nil {
+			var err error
+			if e.Vec == nil {
+				err = t.Truncate(e.ID)
+			} else {
+				err = t.Upsert(e.ID, e.Vec)
+			}
+			if err != nil {
 				return fmt.Errorf("%w: centroid delta: %v", ErrCorrupt, err)
 			}
 		}
@@ -185,13 +212,13 @@ func (t *Tree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
 // they already agree, and otherwise a clone with the changed and appended
 // slots upserted — what ApplyCentroidDeltas does with a delta. A split
 // changes one slot and appends one, and rebuilding a ~10k-centroid tree for
-// that costs far more than two upserts. At most limit slots are upserted
-// (callers pass max(2, t.Leaves()/16), the CentroidDelta bound); past it, or
-// when slots were removed (a merge renumbers them), ok is false and the
-// caller builds.
+// that costs far more than two upserts. A shorter set cuts the tree to
+// its length first (Truncate). At most limit slots are upserted (callers
+// pass max(2, t.Leaves()/16), the CentroidDelta bound); past it ok is
+// false and the caller builds.
 func (t *Tree) UpsertAll(centroids [][]float32, limit int) (*Tree, bool) {
 	leaves := t.Leaves()
-	if len(centroids) < leaves {
+	if len(centroids) == 0 {
 		return nil, false
 	}
 	var changed []int
@@ -204,10 +231,15 @@ func (t *Tree) UpsertAll(centroids [][]float32, limit int) (*Tree, bool) {
 		}
 		changed = append(changed, i)
 	}
-	if len(changed) == 0 {
+	if len(changed) == 0 && len(centroids) == leaves {
 		return t, true
 	}
 	c := t.Clone()
+	if len(centroids) < leaves {
+		if err := c.Truncate(len(centroids)); err != nil {
+			return nil, false
+		}
+	}
 	for _, i := range changed {
 		if err := c.Upsert(i, centroids[i]); err != nil {
 			return nil, false
