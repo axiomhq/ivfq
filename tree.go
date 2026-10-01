@@ -665,13 +665,12 @@ func (t Tree) Clone() Tree {
 // appends must stay contiguous. The height never changes and the result
 // round-trips through MarshalBinary and UnmarshalTree.
 //
-// A replace writes v into the slot the leaf's reference already aliases —
-// index() made t.leaves[id] a sub-slice of the owning holder's block, so
-// one copy serves both views — and refreshes that holder's norm. Internal
-// centroids are deliberately not recomputed: a re-centred hood moves by a
-// fraction of its radius, the beam walks a handful of candidates per
-// level, and holders are ranked by their means, which drift negligibly
-// over a run of upserts. Recentring is what the next full Build is for.
+// A replace moves the leaf to the holder nearest to v (replace), so a
+// slot refilled with a far centroid stays reachable. Internal centroids
+// are deliberately not recomputed: the beam walks a handful of candidates
+// per level, and holders are ranked by their means, which drift
+// negligibly over a run of upserts. Recentring is what the next full
+// Build is for.
 //
 // An append descends the hierarchy the way Nearest does (beam = fanout) to
 // find the holder whose centroid is nearest to v, appends the leaf there,
@@ -705,61 +704,72 @@ func (t *Tree) Upsert(id int, v []float32) error {
 	return nil
 }
 
-// Truncate cuts the tree to its first n leaves: each later leaf leaves its
-// holder, which gets a fresh block of the leaves it keeps (holder blocks
-// are sub-slices of one arena, as in appendLeaf). Internal centroids stay,
-// as they do under Upsert, and a holder may be left empty; the next Build
-// rebalances.
+// Truncate cuts the tree to its first n leaves, each later leaf detached
+// from its holder. Internal centroids stay, as they do under Upsert, and
+// a holder may be left empty; the next Build rebalances.
 func (t *Tree) Truncate(n int) error {
 	if n < 0 || n > len(t.leaves) {
 		return fmt.Errorf("ivf: truncate to %d of %d leaves", n, len(t.leaves))
 	}
-	if n == len(t.leaves) {
-		return nil
-	}
-	for i := range t.nodes {
-		h := &t.nodes[i]
-		if len(h.children) > 0 || !slices.ContainsFunc(h.leaves, func(id int) bool { return id >= n }) {
-			continue
-		}
-		var leaves []int
-		var norms, blk []float32
-		for j, id := range h.leaves {
-			if id < n {
-				leaves, norms = append(leaves, id), append(norms, h.norms[j])
-				blk = append(blk, t.leaves[id]...)
-			}
-		}
-		h.leaves, h.norms, h.block = leaves, norms, blk
-		for j, id := range leaves {
-			t.leaves[id] = blk[j*t.dims : (j+1)*t.dims : (j+1)*t.dims]
-		}
+	for id := len(t.leaves) - 1; id >= n; id-- {
+		t.detach(id)
 	}
 	clear(t.leaves[n:])
 	t.leaves = t.leaves[:n]
 	return nil
 }
 
-// replace writes v into the leaf's slot and refreshes the owning holder's
-// norm. Finding the owner walks every holder's leaf list — O(leaves) int
-// comparisons, noise next to the k-means and re-serialization a replace
-// would otherwise force — and keeps the leaf's reference aliasing its
-// block slot.
+// replace moves leaf id to v: out of its holder and into the holder
+// nearest to v, as an append places a new leaf. Rewriting the vector in
+// its old holder held only while a leaf moved by a fraction of its
+// radius; a cluster dropped by moving the last one into its slot moves the
+// slot anywhere, and a probe that never visits the old holder would never
+// find it.
 func (t *Tree) replace(id int, v []float32) {
+	t.detach(id)
+	t.attach(t.nearestHolder(v), id, v)
+}
+
+// detach takes leaf id out of the holder that owns it, which gets a fresh
+// block of the leaves it keeps (holder blocks are sub-slices of one arena:
+// shrinking in place would leave a neighbour's references stale).
+func (t *Tree) detach(id int) {
 	for i := range t.nodes {
-		n := &t.nodes[i]
-		if len(n.children) > 0 {
-			continue // internal; a valid tree ranks leaves only in holders
+		h := &t.nodes[i]
+		j := slices.Index(h.leaves, id)
+		if len(h.children) > 0 || j < 0 {
+			continue
 		}
-		for j, lid := range n.leaves {
-			if lid == id {
-				copy(t.leaves[id], v)
-				n.norms[j] = Dot(v, v)
-				return
-			}
+		h.leaves = slices.Delete(slices.Clone(h.leaves), j, j+1)
+		h.norms = slices.Delete(slices.Clone(h.norms), j, j+1)
+		blk := make([]float32, 0, len(h.leaves)*t.dims)
+		for _, lid := range h.leaves {
+			blk = append(blk, t.leaves[lid]...)
 		}
+		h.block = blk
+		for k, lid := range h.leaves {
+			t.leaves[lid] = blk[k*t.dims : (k+1)*t.dims : (k+1)*t.dims]
+		}
+		return
 	}
-	copy(t.leaves[id], v) // unowned by any holder, so unreachable from search
+}
+
+// attach adds leaf id with centroid v to holder h with a fresh block, or,
+// with no holder (h < 0), leaves it unowned and unreachable from search.
+func (t *Tree) attach(h, id int, v []float32) {
+	if h < 0 {
+		t.leaves[id] = append([]float32(nil), v...)
+		return
+	}
+	n := &t.nodes[h]
+	n.leaves = append(slices.Clone(n.leaves), id)
+	n.norms = append(slices.Clone(n.norms), Dot(v, v))
+	blk := make([]float32, 0, len(n.block)+len(v))
+	blk = append(append(blk, n.block...), v...)
+	n.block = blk
+	for k, lid := range n.leaves {
+		t.leaves[lid] = blk[k*t.dims : (k+1)*t.dims : (k+1)*t.dims]
+	}
 }
 
 // appendLeaf adds a leaf to the holder whose centroid is nearest to v. An
