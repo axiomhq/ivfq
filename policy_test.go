@@ -1,6 +1,8 @@
 package ivfq
 
 import (
+	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -299,13 +301,13 @@ func TestMergeTargetKeepsTheHostUnderTheSplitTrigger(t *testing.T) {
 		t.Fatalf("setup: total %d, merge below %d, split above %d do not fit the counts %v", total, below, above, counts[:4])
 	}
 
-	if tiny, host, ok := MergeTarget(st, centroids); !ok || tiny != 2 || host != 3 {
+	if tiny, host, ok := mergeTarget(st, centroids); !ok || tiny != 2 || host != 3 {
 		t.Fatalf("merge %d into %d (ok %v); want the second tiny, 2, into its roomy neighbour 3", tiny, host, ok)
 	}
 	// Only the blocked tiny left: no merge.
 	blocked := append([]int{}, counts...)
 	blocked[2] = 30
-	if tiny, host, ok := MergeTarget(stats(blocked), centroids); ok {
+	if tiny, host, ok := mergeTarget(stats(blocked), centroids); ok {
 		t.Fatalf("merged %d into %d: the host would pass the split trigger (%d + %d > %d)", tiny, host, blocked[tiny], blocked[host], above)
 	}
 	if !MergeOwed(stats(blocked)) {
@@ -319,13 +321,13 @@ func TestMergeTargetKeepsTheHostUnderTheSplitTrigger(t *testing.T) {
 	if st := stats(full); MergeOwed(st) {
 		t.Fatalf("owed a merge no cluster has room for (above %d)", SplitAbove(TotalCount(st)))
 	}
-	if _, _, ok := MergeTarget(stats(full), centroids[:len(full)]); ok {
+	if _, _, ok := mergeTarget(stats(full), centroids[:len(full)]); ok {
 		t.Fatal("merged a tiny no cluster has room for")
 	}
 	// Room beside the smallest tiny: it merges into its nearest neighbour.
 	roomy := append([]int{}, counts...)
 	roomy[1] = 60
-	if tiny, host, ok := MergeTarget(stats(roomy), centroids); !ok || tiny != 0 || host != 1 {
+	if tiny, host, ok := mergeTarget(stats(roomy), centroids); !ok || tiny != 0 || host != 1 {
 		t.Fatalf("merge %d into %d (ok %v); want the smallest tiny, 0, into its nearest neighbour 1", tiny, host, ok)
 	}
 	// An empty cluster is owed a reclaim.
@@ -333,5 +335,63 @@ func TestMergeTargetKeepsTheHostUnderTheSplitTrigger(t *testing.T) {
 	empty[0] = 0
 	if !MergeOwed(stats(empty)) {
 		t.Fatal("an empty cluster is not owed")
+	}
+}
+
+// mergeTarget is the first merge MergeTargets plans.
+func mergeTarget(stats []ClusterStat, centroids [][]float32) (tiny, host int, ok bool) {
+	pairs := MergeTargets(stats, centroids, nil, 1)
+	if len(pairs) == 0 {
+		return 0, 0, false
+	}
+	return pairs[0][0], pairs[0][1], true
+}
+
+// TestMergeTargetsPlansDisjointPairs: a plan of many merges pairs each tiny
+// with its nearest neighbour, never uses a cluster twice or a busy one,
+// keeps every host under the split trigger, and plans for n pairs the
+// first n of what it plans for more.
+func TestMergeTargetsPlansDisjointPairs(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	const k, dims = 400, 8
+	stats := make([]ClusterStat, k)
+	centroids := make([][]float32, k)
+	for i := range stats {
+		n := 60 + rng.IntN(60)
+		if i%3 == 0 {
+			n = 1 + rng.IntN(5)
+		}
+		stats[i] = ClusterStat{ID: i, Count: n, Radius: 1}
+		centroids[i] = make([]float32, dims)
+		for j := range centroids[i] {
+			centroids[i][j] = rng.Float32()
+		}
+	}
+	busy := func(i int) bool { return i%7 == 0 }
+	all := MergeTargets(stats, centroids, busy, k)
+	if len(all) < 20 {
+		t.Fatalf("planned %d merges of %d tinies", len(all), k/3)
+	}
+	above := SplitAbove(TotalCount(stats))
+	used := map[int]bool{}
+	for _, p := range all {
+		tiny, host := p[0], p[1]
+		if used[tiny] || used[host] || busy(tiny) || busy(host) {
+			t.Fatalf("pair %v reuses a cluster or a busy one", p)
+		}
+		used[tiny], used[host] = true, true
+		if stats[tiny].Count+stats[host].Count > above {
+			t.Fatalf("pair %v passes the split trigger %d", p, above)
+		}
+		for i := range centroids {
+			if i != tiny && L2Sq(centroids[tiny], centroids[i]) < L2Sq(centroids[tiny], centroids[host]) {
+				t.Fatalf("pair %v: %d is nearer the tiny", p, i)
+			}
+		}
+	}
+	for _, n := range []int{1, 5, len(all) / 2} {
+		if got := MergeTargets(stats, centroids, busy, n); !slices.Equal(got, all[:n]) {
+			t.Fatalf("n=%d: %v, want the first %d of %v", n, got, n, all)
+		}
 	}
 }

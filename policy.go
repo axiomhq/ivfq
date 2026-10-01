@@ -3,7 +3,9 @@ package ivfq
 import (
 	"cmp"
 	"math"
+	"runtime"
 	"slices"
+	"sync"
 )
 
 const (
@@ -251,63 +253,100 @@ func RoundSqrt(total int) int {
 	return int(math.Round(math.Sqrt(float64(total))))
 }
 
-// MergeTarget picks a tiny cluster and the nearest cluster to absorb it:
-// the smallest tiny whose nearest neighbour stays at or under the split
-// trigger with its rows. A merge past the trigger undoes the split that
-// made the tiny, and the next cycle splits the host again: a lopsided
-// 2-means split leaves a child under MergeBelow, the child's nearest
-// cluster is its sibling, and the layout alternates split and merge on
-// every cycle, forever. A tiny with no such neighbour stays until it grows.
-// The size trigger is the one mirrored: a merge can still widen a host past
-// the radius trigger. centroids[i] is stats[i]'s centroid; tiny and host
-// index stats.
-func MergeTarget(stats []ClusterStat, centroids [][]float32) (tiny, host int, ok bool) {
-	if len(stats) < 2 {
-		return 0, 0, false
+// MergeTargets plans up to n merges at once: pairs of a tiny cluster and
+// the nearest cluster to absorb it, the smallest tinies first, each tiny
+// merging into its nearest neighbour when that neighbour stays at or under
+// the split trigger with its rows. A merge past the trigger undoes the
+// split that made the tiny, and the next cycle splits the host again: a
+// lopsided 2-means split leaves a child under MergeBelow, the child's
+// nearest cluster is its sibling, and the layout alternates split and
+// merge on every cycle, forever. A tiny with no such neighbour stays until
+// it grows. The size trigger is the one mirrored: a merge can still widen a
+// host past the radius trigger.
+//
+// No cluster is in two pairs, and none busy reports (nil: none) is in any:
+// a tiny whose nearest neighbour is busy or already paired waits for a
+// later call rather than taking its second nearest. centroids[i] is
+// stats[i]'s centroid; pairs index stats as {tiny, host}. At most
+// mergeTries distance scans (k × dims each) per pair wanted; they run on
+// GOMAXPROCS goroutines, a batch of tinies per pass over the centroids.
+func MergeTargets(stats []ClusterStat, centroids [][]float32, busy func(i int) bool, n int) [][2]int {
+	if len(stats) < 2 || n < 1 {
+		return nil
+	}
+	if busy == nil {
+		busy = func(int) bool { return false }
 	}
 	// The merge threshold is relative to the size the sizing rule wants at
 	// this total (MergeBelow), mirroring the split trigger from below.
 	total := TotalCount(stats)
 	below, above := MergeBelow(total), SplitAbove(total)
+	smallest := smallestOther(stats)
 	var tinies []int
 	for i, s := range stats {
-		if s.Count >= 1 && s.Count <= below {
+		// A tiny with no room anywhere skips its distance scan.
+		if s.Count >= 1 && s.Count <= below && s.Count+smallest(i) <= above && !busy(i) {
 			tinies = append(tinies, i)
 		}
 	}
 	slices.SortStableFunc(tinies, func(a, b int) int { return cmp.Compare(stats[a].Count, stats[b].Count) })
-	smallest := smallestOther(stats)
-	tries := 0
-	for _, tiny := range tinies {
-		if stats[tiny].Count+smallest(tiny) > above {
-			continue // no cluster anywhere has room: skip the distance scan
-		}
-		// At most mergeTries distance scans (k × dims each) per
-		// call; a layout whose smallest tinies all sit beside full hosts
-		// merges nothing this cycle. Index the centroids if that shows up.
-		if tries++; tries > mergeTries {
-			break
-		}
-		host := -1
-		var best float32
-		for i := range stats {
-			if i == tiny {
+	tinies = tinies[:min(len(tinies), mergeTries*n)]
+	taken := make([]bool, len(stats))
+	var pairs [][2]int
+	for len(tinies) > 0 && len(pairs) < n {
+		batch := tinies[:min(len(tinies), max(mergeBatch, 2*(n-len(pairs))))]
+		tinies = tinies[len(batch):]
+		for j, host := range nearest(batch, centroids) {
+			tiny := batch[j]
+			if taken[tiny] || taken[host] || busy(host) || stats[host].Count+stats[tiny].Count > above {
 				continue
 			}
-			d := L2Sq(centroids[tiny], centroids[i])
-			if host < 0 || d < best {
-				host, best = i, d
+			taken[tiny], taken[host] = true, true
+			if pairs = append(pairs, [2]int{tiny, host}); len(pairs) == n {
+				break
 			}
 		}
-		if stats[host].Count+stats[tiny].Count <= above {
-			return tiny, host, true
-		}
 	}
-	return 0, 0, false
+	return pairs
 }
 
-// mergeTries bounds the tinies one MergeTarget call measures distances for.
+// mergeTries bounds the tinies MergeTargets measures distances for, per
+// pair wanted: a layout whose smallest tinies all sit beside full hosts
+// merges nothing this cycle. Index the centroids if that shows up.
 const mergeTries = 16
+
+// mergeBatch is the fewest tinies one pass over the centroids measures.
+const mergeBatch = 16
+
+// nearest is, for each of tinies, the index of the nearest other centroid
+// (the first at the least distance), GOMAXPROCS workers each streaming the
+// centroids once for its share of tinies.
+func nearest(tinies []int, centroids [][]float32) []int {
+	out := make([]int, len(tinies))
+	workers := min(runtime.GOMAXPROCS(0), len(tinies))
+	var wg sync.WaitGroup
+	for w := range workers {
+		lo, hi := w*len(tinies)/workers, (w+1)*len(tinies)/workers
+		wg.Go(func() {
+			best := make([]float32, hi-lo)
+			for j := lo; j < hi; j++ {
+				out[j] = -1
+			}
+			for i, c := range centroids {
+				for j := lo; j < hi; j++ {
+					if i == tinies[j] {
+						continue
+					}
+					if d := L2Sq(centroids[tinies[j]], c); out[j] < 0 || d < best[j-lo] {
+						out[j], best[j-lo] = i, d
+					}
+				}
+			}
+		})
+	}
+	wg.Wait()
+	return out
+}
 
 // smallestOther returns, for a cluster index, the smallest count among the
 // other clusters: the most room any merge of it could find.
@@ -330,7 +369,7 @@ func smallestOther(stats []ClusterStat) func(i int) int {
 }
 
 // MergeOwed reports an empty cluster (reclaim) or a tiny one with room
-// somewhere to merge into. MergeTarget refuses a merge past the split
+// somewhere to merge into. MergeTargets refuses a merge past the split
 // trigger, so a tiny no cluster has room for owes nothing: counting it
 // would buy a rebalancing cycle that declines every time.
 func MergeOwed(stats []ClusterStat) bool {

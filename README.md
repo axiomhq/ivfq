@@ -55,7 +55,7 @@ the cutoff. The bound is probabilistic; `Query.Exact` drops it.
 
 Splits and merges keep the clusters at their size as rows arrive: a split
 is `kmeans.Config{K: 2, Iters: kmeans.SplitIters}`, and `Policy`,
-`MergeTarget`, `SplitAbove` and `MergeBelow` decide when, reading only
+`MergeTargets`, `SplitAbove` and `MergeBelow` decide when, reading only
 per-cluster counts and radii. No rule ever touches every row.
 
 ## Rank

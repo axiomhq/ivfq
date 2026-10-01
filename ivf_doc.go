@@ -27,10 +27,10 @@ package ivfq
 // cluster.
 //
 // After the build nothing in this package asks for a pass over N. Policy
-// and MergeTarget are stated entirely on []ClusterStat, the per-cluster
+// and MergeTargets are stated entirely on []ClusterStat, the per-cluster
 // counts and radii an index already holds, so consulting them is O(k)
 // arithmetic, and each answer is bounded by one cluster. SplitTarget names
 // the cluster that has grown past SplitAbove (1.4x the target) or spread
-// past twice the mean radius; MergeTarget names a cluster below MergeBelow
-// (a quarter of the target) and the nearest neighbour with room to absorb
-// it. Rebuilding an index is a caller's explicit decision.
+// past twice the mean radius; MergeTargets pairs clusters below MergeBelow
+// (a quarter of the target) with the nearest neighbours that have room to
+// absorb them. Rebuilding an index is a caller's explicit decision.
