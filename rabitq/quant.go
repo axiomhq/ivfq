@@ -179,7 +179,26 @@ func (c Quantizer) MarshalBinary() ([]byte, error) {
 	if c.Code == nil {
 		return nil, fmt.Errorf("quant: codes with no payload")
 	}
-	return c.Code.marshal(c.Dims)
+	return c.Code.marshal(c.Dims, true)
+}
+
+// MarshalRows is MarshalBinary without the centroid: 4*Dims bytes fewer,
+// for a store that files many code blocks under one cluster and keeps its
+// centroid once. UnmarshalRowsBorrowed takes the centroid back.
+func (c Quantizer) MarshalRows() ([]byte, error) {
+	if c.Code == nil {
+		return nil, fmt.Errorf("quant: codes with no payload")
+	}
+	return c.Code.marshal(c.Dims, false)
+}
+
+// UnmarshalRowsBorrowed decodes MarshalRows output against centroid, the
+// one the rows were encoded against, validating it like
+// UnmarshalBinaryBorrowed and keeping the rows in data. The caller must
+// keep data and centroid immutable and alive; codes that share a centroid
+// slice are one frame (SameFrame) without comparing it.
+func UnmarshalRowsBorrowed(data []byte, centroid []float32) (Quantizer, error) {
+	return decodeBits(data, false, true, centroid)
 }
 
 // UnmarshalBinary decodes MarshalBinary output. Everything a row's score

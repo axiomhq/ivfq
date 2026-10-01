@@ -92,6 +92,72 @@ func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 	}
 }
 
+// TestRowsCodesMatchBitCodes: MarshalRows is MarshalBinary less the
+// centroid, exactly 4*dims bytes; decoded against that centroid it scores
+// every row as the full codes do, shares the frame of other blocks decoded
+// against the same slice, and marshals back to the full codes; a centroid
+// of the wrong width, full codes read as rows, and rows read as full codes
+// are refused.
+func TestRowsCodesMatchBitCodes(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		vectors := corpus(64, 129)
+		vectors[5] = make([]float32, 129)
+		c := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
+		full, err := c.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := c.MarshalRows()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(full)-len(rows) != 4*129 {
+			t.Fatalf("%s: rows are %d bytes, full codes %d: want 4*dims fewer", metric, len(rows), len(full))
+		}
+		owned, err := UnmarshalBinary(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		centroid := slices.Clone(owned.Code.Centroid)
+		got, err := UnmarshalRowsBorrowed(rows, centroid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Rows() != owned.Rows() || got.Retained() != 0 {
+			t.Fatalf("%s: rows=%d retained=%d", metric, got.Rows(), got.Retained())
+		}
+		for _, qi := range []int{3, 40} {
+			q := NewQuery(vectors[qi], metric, rotOf(owned))
+			for row := 0; row < got.Rows(); row++ {
+				gs, gb := got.ScoreAndBound(q, row)
+				ws, wb := owned.ScoreAndBound(q, row)
+				if gs != ws || gb != wb {
+					t.Fatalf("%s q%d row %d: (%v,%v), want (%v,%v)", metric, qi, row, gs, gb, ws, wb)
+				}
+			}
+		}
+		other, err := UnmarshalRowsBorrowed(slices.Clone(rows), centroid)
+		if err != nil || !got.SameFrame(&other) || !got.SameFrame(&owned) {
+			t.Fatalf("%s: rows decoded against one centroid are not one frame (%v)", metric, err)
+		}
+		if back, err := got.MarshalBinary(); err != nil || !reflect.DeepEqual(back, full) {
+			t.Fatalf("%s: rows marshal back to full codes: %v", metric, err)
+		}
+		if back, err := got.MarshalRows(); err != nil || !reflect.DeepEqual(back, rows) {
+			t.Fatalf("%s: rows marshal back to rows: %v", metric, err)
+		}
+		if _, err := UnmarshalRowsBorrowed(rows, centroid[:128]); err == nil {
+			t.Fatalf("%s: a 128-wide centroid decoded 129-wide rows", metric)
+		}
+		if _, err := UnmarshalRowsBorrowed(full, centroid); err == nil {
+			t.Fatalf("%s: full codes decoded as rows", metric)
+		}
+		if _, err := UnmarshalBinaryBorrowed(rows); err == nil {
+			t.Fatalf("%s: rows decoded as full codes", metric)
+		}
+	}
+}
+
 // Every scalar a 1-bit score depends on prunes the exact rerank before a
 
 // full vector is read, so bits the encoder could never write must not decode.

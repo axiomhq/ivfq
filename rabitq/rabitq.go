@@ -44,6 +44,10 @@ import (
 // survives the bound pass) for callers that want the certainty back.
 const (
 	bitsMagic = "DQB1"
+	// rowsMagic is a DQB1 part without its centroid (Quantizer.MarshalRows):
+	// a store that files many code blocks under one cluster keeps the
+	// centroid once and hands it back to UnmarshalRowsBorrowed.
+	rowsMagic = "DQR1"
 	// bitsHeader is magic(4) version(2) metric(1) qbits(1) dims(4) rows(4)
 	// seed(8).
 	bitsHeader   = 24
@@ -105,6 +109,9 @@ type Code struct {
 	borrowed []byte
 	rows     int
 	dims     int
+	// cOff is the centroid's bytes in borrowed: 4*dims for DQB1, 0 for
+	// DQR1, whose centroid is the Centroid slice the caller handed in.
+	cOff int
 }
 
 func bitWords(dims int) int { return (dims + 63) / 64 }
@@ -126,7 +133,7 @@ func (b *Code) Rows() int {
 }
 
 func (b *Code) centroid(i int) float32 {
-	if b.borrowed != nil {
+	if b.borrowed != nil && b.cOff > 0 {
 		return math.Float32frombits(binary.LittleEndian.Uint32(b.borrowed[bitsHeader+4*i:]))
 	}
 	return b.Centroid[i]
@@ -134,21 +141,21 @@ func (b *Code) centroid(i int) float32 {
 
 func (b *Code) norm(i int) float32 {
 	if b.borrowed != nil {
-		return math.Float32frombits(binary.LittleEndian.Uint32(b.borrowed[bitsHeader+4*b.dims+4*i:]))
+		return math.Float32frombits(binary.LittleEndian.Uint32(b.borrowed[bitsHeader+b.cOff+4*i:]))
 	}
 	return b.Norms[i]
 }
 
 func (b *Code) align(i int) float32 {
 	if b.borrowed != nil {
-		return math.Float32frombits(binary.LittleEndian.Uint32(b.borrowed[bitsHeader+4*b.dims+4*b.rows+4*i:]))
+		return math.Float32frombits(binary.LittleEndian.Uint32(b.borrowed[bitsHeader+b.cOff+4*b.rows+4*i:]))
 	}
 	return b.Aligns[i]
 }
 
 func (b *Code) word(i int) uint64 {
 	if b.borrowed != nil {
-		return binary.LittleEndian.Uint64(b.borrowed[bitsHeader+4*b.dims+8*b.rows+8*i:])
+		return binary.LittleEndian.Uint64(b.borrowed[bitsHeader+b.cOff+8*b.rows+8*i:])
 	}
 	return b.Words[i]
 }
@@ -349,17 +356,21 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	b.Aligns[i] = float32(min(1, align))
 }
 
-func (b *Code) marshal(dims int) ([]byte, error) {
-	if b.borrowed != nil {
+func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
+	if b.borrowed != nil && withCentroid == (b.cOff > 0) {
 		return bytes.Clone(b.borrowed), nil
 	}
-	rows := b.Rows()
-	if len(b.Aligns) != rows || len(b.Centroid) != dims || len(b.Words) != rows*bitWords(dims) {
+	rows, w := b.Rows(), bitWords(dims)
+	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || len(b.Words) != rows*w) {
 		return nil, fmt.Errorf("quant: inconsistent 1-bit codes")
 	}
 	var out bytes.Buffer
-	out.Grow(bitsHeader + 4*dims + 8*rows + 8*len(b.Words))
-	out.WriteString(bitsMagic)
+	out.Grow(bitsHeader + 4*dims + 8*rows + 8*rows*w)
+	magic := rowsMagic
+	if withCentroid {
+		magic = bitsMagic
+	}
+	out.WriteString(magic)
 	var scratch [8]byte
 	put16 := func(v uint16) { binary.LittleEndian.PutUint16(scratch[:2], v); out.Write(scratch[:2]) }
 	put32 := func(v uint32) { binary.LittleEndian.PutUint32(scratch[:4], v); out.Write(scratch[:4]) }
@@ -374,17 +385,19 @@ func (b *Code) marshal(dims int) ([]byte, error) {
 	put32(uint32(dims))
 	put32(uint32(rows))
 	put64(b.Seed)
-	for _, x := range b.Centroid {
-		put32(math.Float32bits(x))
+	if withCentroid {
+		for i := range dims {
+			put32(math.Float32bits(b.centroid(i)))
+		}
 	}
-	for _, x := range b.Norms {
-		put32(math.Float32bits(x))
+	for i := range rows {
+		put32(math.Float32bits(b.norm(i)))
 	}
-	for _, x := range b.Aligns {
-		put32(math.Float32bits(x))
+	for i := range rows {
+		put32(math.Float32bits(b.align(i)))
 	}
-	for _, x := range b.Words {
-		put64(x)
+	for i := range rows * w {
+		put64(b.word(i))
 	}
 	return out.Bytes(), nil
 }
@@ -396,12 +409,18 @@ func (b *Code) marshal(dims int) ([]byte, error) {
 // <x_b, x> for a unit x, so it cannot be below 1/sqrt(D) nor above 1), the
 // agreement between "no residual" and "no alignment", and zero padding in
 // the bits past the last dimension.
-func unmarshalBits(data []byte) (Quantizer, error) { return decodeBits(data, false) }
+func unmarshalBits(data []byte) (Quantizer, error) { return decodeBits(data, true, false, nil) }
 
-func unmarshalBitsBorrowed(data []byte) (Quantizer, error) { return decodeBits(data, true) }
+func unmarshalBitsBorrowed(data []byte) (Quantizer, error) { return decodeBits(data, true, true, nil) }
 
-func decodeBits(data []byte, borrow bool) (Quantizer, error) {
-	if len(data) < bitsHeader || string(data[:4]) != bitsMagic {
+// decodeBits decodes a DQB1 part (withCentroid) or a DQR1 part, whose
+// centroid is the one given.
+func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Quantizer, error) {
+	magic := rowsMagic
+	if withCentroid {
+		magic = bitsMagic
+	}
+	if len(data) < bitsHeader || string(data[:4]) != magic {
 		return Quantizer{}, fmt.Errorf("quant: invalid 1-bit codes header")
 	}
 	if v := binary.LittleEndian.Uint16(data[4:]); v != bitsVersion {
@@ -419,21 +438,32 @@ func decodeBits(data []byte, borrow bool) (Quantizer, error) {
 	if dims <= 0 || rows < 0 || seed == 0 {
 		return Quantizer{}, fmt.Errorf("quant: 1-bit codes shape %dx%d seed %d", rows, dims, seed)
 	}
+	cOff := 0
+	if withCentroid {
+		cOff = 4 * dims
+	} else if len(centroid) != dims {
+		return Quantizer{}, fmt.Errorf("quant: a %d-wide centroid for %d-wide codes", len(centroid), dims)
+	}
 	w := bitWords(dims)
-	want := uint64(bitsHeader) + 4*uint64(dims) + 8*uint64(rows) + 8*uint64(rows)*uint64(w)
+	want := uint64(bitsHeader) + uint64(cOff) + 8*uint64(rows) + 8*uint64(rows)*uint64(w)
 	if want != uint64(len(data)) {
 		return Quantizer{}, fmt.Errorf("quant: 1-bit codes are %d bytes, a %dx%d part is %d", len(data), rows, dims, want)
 	}
-	b := &Code{Seed: seed, Unit: metric == metricUnit, rows: rows, dims: dims}
+	b := &Code{Seed: seed, Unit: metric == metricUnit, rows: rows, dims: dims, cOff: cOff}
+	if !withCentroid {
+		b.Centroid = centroid
+	}
 	if borrow {
 		b.borrowed = data
 	} else {
 		b.Words = make([]uint64, rows*w)
-		b.Centroid = make([]float32, dims)
 		b.Norms = make([]float32, rows)
 		b.Aligns = make([]float32, rows)
-		for i := range b.Centroid {
-			b.Centroid[i] = b.centroidFrom(data, i)
+		if withCentroid {
+			b.Centroid = make([]float32, dims)
+			for i := range b.Centroid {
+				b.Centroid[i] = b.centroidFrom(data, i)
+			}
 		}
 		for i := range b.Norms {
 			b.Norms[i] = b.normFrom(data, i)
@@ -482,7 +512,7 @@ func decodeBits(data []byte, borrow bool) (Quantizer, error) {
 		}
 	}
 	if !borrow {
-		b.rows, b.dims = 0, 0 // owned Code keeps its historical shape
+		b.rows, b.dims, b.cOff = 0, 0, 0 // owned Code keeps its historical shape
 	}
 	return Quantizer{Dims: dims, Code: b}, nil
 }
@@ -496,6 +526,9 @@ func (b *Code) sameFrame(o *Code) bool {
 	if b == nil || o == nil || b.Seed != o.Seed || b.Unit != o.Unit || b.width() != o.width() {
 		return false
 	}
+	if len(b.Centroid) > 0 && len(o.Centroid) == len(b.Centroid) && &b.Centroid[0] == &o.Centroid[0] {
+		return true // one centroid slice: codes decoded against a shared centroid
+	}
 	for i := 0; i < b.width(); i++ {
 		if b.centroid(i) != o.centroid(i) {
 			return false
@@ -508,13 +541,13 @@ func (b *Code) centroidFrom(data []byte, i int) float32 {
 	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+4*i:]))
 }
 func (b *Code) normFrom(data []byte, i int) float32 {
-	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+4*b.dims+4*i:]))
+	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+b.cOff+4*i:]))
 }
 func (b *Code) alignFrom(data []byte, i int) float32 {
-	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+4*b.dims+4*b.rows+4*i:]))
+	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+b.cOff+4*b.rows+4*i:]))
 }
 func (b *Code) wordFrom(data []byte, i int) uint64 {
-	return binary.LittleEndian.Uint64(data[bitsHeader+4*b.dims+8*b.rows+8*i:])
+	return binary.LittleEndian.Uint64(data[bitsHeader+b.cOff+8*b.rows+8*i:])
 }
 
 // bitScorer is one hood's bits bound to one query: the query's residual to
@@ -631,7 +664,7 @@ func (s *bitScorer) rowIP(row int) float64 {
 	off := row * s.words
 	var ones, weighted uint64
 	if b := s.b; b.borrowed != nil {
-		ones, weighted = simd.BitProductBytes(b.borrowed[bitsHeader+4*b.dims+8*b.rows+8*off:], s.planes, s.words)
+		ones, weighted = simd.BitProductBytes(b.borrowed[bitsHeader+b.cOff+8*b.rows+8*off:], s.planes, s.words)
 	} else {
 		ones, weighted = simd.BitProductWords(b.Words[off:off+s.words], s.planes)
 	}
