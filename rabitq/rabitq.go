@@ -59,6 +59,10 @@ const (
 	zeroRowAlign = -1
 )
 
+// newBitScorer sets the four planes unrolled: compile only at four bits.
+var _ [queryBits - 4]struct{}
+var _ [4 - queryBits]struct{}
+
 // boundSigmas is eps0: how many standard deviations of estimator error the
 // conservative bound carries. The error is a projection of a fixed vector
 // onto a direction the random rotation makes uniform, so it concentrates
@@ -634,31 +638,39 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	// rounding residual's norm rather than bounded worst-case (a worst-case
 	// query term is sqrt(D)*delta/2, three times the data term at 128 dims,
 	// and it would swamp a bound whose whole job is to prune).
+	// Once per probed hood, so it is a hood's fixed cost: the builtin
+	// min and max inline where math.Min and math.Max are calls, the sums
+	// stay in registers, and the planes are set without a branch per bit.
+	// The codes are the same, bit for bit.
 	inv := 1 / s.qNorm
 	lo, hi := math.Inf(1), math.Inf(-1)
 	for j := range resid {
 		x := float64(resid[j]) * inv
-		lo, hi = math.Min(lo, x), math.Max(hi, x)
+		lo, hi = min(lo, x), max(hi, x)
 	}
-	s.low = lo
-	s.delta = (hi - lo) / queryLevels
+	delta := (hi - lo) / queryLevels
+	s.low, s.delta = lo, delta
 	s.planes = make([]uint64, queryBits*s.words)
+	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
+	var sumQ, resid2 float64
 	for j := range resid {
 		x := float64(resid[j]) * inv
 		code := 0
-		if s.delta > 0 {
-			code = int(math.Round((x - lo) / s.delta))
+		if delta > 0 {
+			code = int(math.Round((x - lo) / delta))
 			code = min(queryLevels, max(0, code))
 		}
-		s.sumQ += float64(code)
-		e := lo + s.delta*float64(code) - x
-		s.resid2 += e * e
-		for p := 0; p < queryBits; p++ {
-			if code&(1<<p) != 0 {
-				s.planes[p*s.words+j/64] |= 1 << uint(j%64)
-			}
-		}
+		sumQ += float64(code)
+		e := lo + delta*float64(code) - x
+		resid2 += e * e
+		w, sh := j/64, uint(j%64)
+		c := uint64(code)
+		p0[w] |= (c & 1) << sh
+		p1[w] |= (c >> 1 & 1) << sh
+		p2[w] |= (c >> 2 & 1) << sh
+		p3[w] |= (c >> 3 & 1) << sh
 	}
+	s.sumQ, s.resid2 = sumQ, resid2
 	s.varQ = s.resid2 / float64(d)
 	return s
 }

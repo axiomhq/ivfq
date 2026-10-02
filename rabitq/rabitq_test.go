@@ -721,3 +721,24 @@ func TestScoreIsScoreAndBoundScore(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkScorerBind is a hood's fixed cost: binding the query to its
+// codes, once per probed hood, with the query rotated once per query.
+func BenchmarkScorerBind(b *testing.B) {
+	v := corpus(256, 128)
+	rot := NewRotation(11, 128)
+	c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: rot})
+	if err != nil {
+		b.Fatal(err)
+	}
+	rq := NewQuery(v[3], ivfq.L2, rot).Rotated(rot)
+	cent := make([]float32, 128)
+	for i := range cent {
+		cent[i] = c.Code.centroid(i)
+	}
+	rc := RotateCentroid(cent, rot)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = c.ScorerRotated(rq, rc)
+	}
+}
