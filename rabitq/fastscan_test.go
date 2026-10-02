@@ -263,3 +263,40 @@ func TestPackedColumnIsTheColumn(t *testing.T) {
 		}
 	}
 }
+
+// A packed column charges what it holds: a centroid only when it owns
+// one (copied out of borrowed bytes), not the cluster's centroid that
+// every block decoded with UnmarshalRowsBorrowed shares; and with a shared
+// centroid, less than the same rows unpacked.
+func TestPackedRetained(t *testing.T) {
+	const dims, rows = 128, 64
+	v := corpus(rows, dims)
+	c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: NewRotation(3, dims)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rowsBytes, err := c.MarshalRows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := UnmarshalRowsBorrowed(rowsBytes, c.Code.Centroid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared.PackFastScan()
+	raw, err := c.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := UnmarshalBinaryBorrowed(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned.PackFastScan()
+	if d := owned.Retained() - shared.Retained(); d != 4*dims {
+		t.Fatalf("owned centroid charges %d more than a shared one, want %d", d, 4*dims)
+	}
+	if shared.Retained() >= c.Retained() {
+		t.Fatalf("packed with a shared centroid charges %d, the unpacked column %d", shared.Retained(), c.Retained())
+	}
+}

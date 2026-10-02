@@ -132,6 +132,10 @@ type fastLayout struct {
 	// norms and aligns are the column's, decoded once: a borrowed column
 	// reads them out of its bytes per row.
 	norms, aligns []float32
+	// ownCentroid: packing copied the centroid out of the borrowed bytes.
+	// Otherwise it is the caller's (UnmarshalRowsBorrowed), shared by every
+	// block of a cluster, and retained does not charge it per column.
+	ownCentroid bool
 }
 
 // fastGroups is the scan's group count at dims: a nibble per four
@@ -193,7 +197,7 @@ func (c *Quantizer) PackFastScan() {
 		for i := range c {
 			c[i] = b.centroid(i)
 		}
-		b.Centroid = c
+		b.Centroid, f.ownCentroid = c, true
 	}
 	b.Norms, b.Aligns = f.norms, f.aligns
 	b.Words, b.borrowed, b.cOff = nil, nil, 0
@@ -1047,5 +1051,9 @@ func (b *Code) retained() int {
 	if b.borrowed != nil {
 		return n // the probe entry already charges the raw column
 	}
-	return n + 8*len(b.Words) + 4*(len(b.Centroid)+len(b.Norms)+len(b.Aligns)) + 32
+	centroid := len(b.Centroid)
+	if f := b.fast; f != nil && !f.ownCentroid {
+		centroid = 0
+	}
+	return n + 8*len(b.Words) + 4*(centroid+len(b.Norms)+len(b.Aligns)) + 32
 }
