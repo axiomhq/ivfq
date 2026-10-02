@@ -694,3 +694,30 @@ func abs32(x float32) float32 {
 	}
 	return x
 }
+
+// Score is ScoreAndBound's estimate bit for bit: on both metrics, a zero
+// row, a query that is the centroid, a zero cosine query and an exact one.
+func TestScoreIsScoreAndBoundScore(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		v := corpus(300, 128)
+		v[7] = make([]float32, 128) // a zero row
+		c, err := Quantize(v, Options{Metric: metric, Rotation: NewRotation(5, 128)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		queries := [][]float32{v[3], v[150], make([]float32, 128)}
+		for qi, q := range queries {
+			for _, exact := range []bool{false, true} {
+				pq := NewQuery(q, metric, rotOf(c))
+				pq.Exact = exact
+				s := c.Scorer(pq)
+				for row := range v {
+					want, _ := s.ScoreAndBound(row)
+					if got := s.Score(row); math.Float32bits(got) != math.Float32bits(want) {
+						t.Fatalf("%v query %d exact=%v row %d: Score %v, ScoreAndBound %v", metric, qi, exact, row, got, want)
+					}
+				}
+			}
+		}
+	}
+}

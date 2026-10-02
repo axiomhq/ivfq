@@ -729,6 +729,26 @@ func (s *bitScorer) scoreAndBound(row int) (float32, float32) {
 	return float32(scoreOf(s.l2, dist2)), nextUp(float32(scoreOf(s.l2, lower)))
 }
 
+// score is scoreAndBound's estimate: the same arithmetic, minus the bound.
+func (s *bitScorer) score(row int) float32 {
+	if s.dead {
+		return 0
+	}
+	align := float64(s.b.align(row))
+	if align == zeroRowAlign {
+		return 0
+	}
+	norm := float64(s.b.norm(row))
+	dist2 := norm*norm + s.qNorm*s.qNorm
+	if norm > 0 && s.qNorm > 0 && align > 0 {
+		ip := s.rowIP(row) / align
+		dist2 -= 2 * norm * s.qNorm * ip
+	}
+	gap := norm - s.qNorm
+	dist2 = max(dist2, gap*gap)
+	return float32(scoreOf(s.l2, dist2))
+}
+
 // scoreOf maps a squared distance to the metric's higher-is-better score.
 // Unit rows and a unit query put cosine at 1 - d^2/2.
 func scoreOf(l2 bool, dist2 float64) float64 {

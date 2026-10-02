@@ -350,11 +350,9 @@ func (c *Quantizer) SameFrame(o *Quantizer) bool { return c.Code.sameFrame(o.Cod
 // which is how a caller buys the certainty back.
 func (s Scorer) ScoreAndBound(row int) (score, bound float32) { return s.bit.scoreAndBound(row) }
 
-// Score is ScoreAndBound's estimate alone.
-func (s Scorer) Score(row int) float32 {
-	score, _ := s.bit.scoreAndBound(row)
-	return score
-}
+// Score is ScoreAndBound's estimate alone, bit for bit, without the
+// bound's arithmetic: a probe reads bounds only for its nearest hoods.
+func (s Scorer) Score(row int) float32 { return s.bit.score(row) }
 
 // Score is the one-off form of Scorer.Score: it binds the query for a single
 // row. Tests and oracles use it; the candidate pass does not, because the
