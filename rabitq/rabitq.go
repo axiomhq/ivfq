@@ -132,6 +132,13 @@ type fastLayout struct {
 	// norms and aligns are the column's, decoded once: a borrowed column
 	// reads them out of its bytes per row.
 	norms, aligns []float32
+	// xbc is <x_b, Rc> per row, the column's rotated centroid against the
+	// row's code (PackFastScanFrame), and rcc ||Rc||^2: what a global query
+	// (Query.Global) subtracts instead of quantizing its residual per
+	// column. nil until packed with a frame.
+	xbc []float32
+	rc  []float32
+	rcc float64
 	// ownCentroid: packing copied the centroid out of the borrowed bytes.
 	// Otherwise it is the caller's (UnmarshalRowsBorrowed), shared by every
 	// block of a cluster, and retained does not charge it per column.
@@ -147,6 +154,51 @@ func fastGroups(dims int) int {
 		return 0
 	}
 	return g
+}
+
+// PackFastScanFrame is PackFastScan, plus what a global query needs
+// (Scorer.BindGlobal): rc is the column's centroid rotated into its codes'
+// frame (RotateCentroid), and each row's <x_b, rc> is kept. The column
+// keeps rc.
+func (c *Quantizer) PackFastScanFrame(rc []float32) {
+	b := c.Code
+	if b.fast != nil && b.fast.xbc != nil {
+		return
+	}
+	d := b.width()
+	if len(rc) != d || fastGroups(d) == 0 {
+		c.PackFastScan()
+		return
+	}
+	rows, words := b.Rows(), bitWords(d)
+	var sum float64
+	for _, v := range rc {
+		sum += float64(v)
+	}
+	scale := 1 / math.Sqrt(float64(d))
+	xbc := make([]float32, rows)
+	for r := range rows {
+		// <x_b, rc> = (2 Σ_{b_j=1} rc_j - Σ rc_j) / sqrt(D)
+		var on float64
+		for w := range words {
+			x := b.word(r*words + w)
+			for x != 0 {
+				j := w*64 + bits.TrailingZeros64(x)
+				on += float64(rc[j])
+				x &= x - 1
+			}
+		}
+		xbc[r] = float32((2*on - sum) * scale)
+	}
+	var rcc float64
+	for _, v := range rc {
+		rcc += float64(v) * float64(v)
+	}
+	c.PackFastScan()
+	if b.fast == nil {
+		return
+	}
+	b.fast.xbc, b.fast.rc, b.fast.rcc = xbc, rc, rcc
 }
 
 // PackFastScan lays the column's rows out for Scorer.ScoreAll's batched
@@ -687,6 +739,11 @@ type bitScorer struct {
 	varQ   float64 // resid2/dims, the query term of the estimator's variance
 	freeD  float64 // max(dims-1, 1)
 
+	// g is the global query a BindGlobal scorer reads, with inv
+	// 1/||q - c||; nil for a scorer bound per column.
+	g   *globalQuery
+	inv float64
+
 	dead   bool // a zero cosine query: everything scores 0
 	sigmas float64
 	exact  bool
@@ -697,6 +754,36 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	s := new(bitScorer)
 	c.bind(s, q, rc)
 	return s
+}
+
+// bindGlobal sets s to the global query q against c (BindGlobal checked
+// both): the query's quantization is q's, and the column's part is its
+// distance to c's centroid.
+func (c *Quantizer) bindGlobal(s *bitScorer, q Query) {
+	b := c.Code
+	d := c.Dims
+	planes, lut, sums := s.planes, s.lut, s.sums
+	*s = bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
+		freeD: math.Max(float64(d-1), 1), sigmas: boundSigmas, exact: q.Exact,
+		l2: q.Metric == ivfq.L2, planes: planes[:0], lut: lut[:0], sums: sums}
+	if q.Sigmas > 0 {
+		s.sigmas = q.Sigmas
+	}
+	if b.Unit && q.invNorm == 0 {
+		s.dead = true
+		return
+	}
+	g := q.global
+	f := b.fast
+	n2 := g.qq + f.rcc - 2*float64(ivfq.Dot(q.rotated, f.rc))
+	s.qNorm = math.Sqrt(max(0, n2))
+	if s.qNorm == 0 {
+		return
+	}
+	s.g, s.inv = g, 1/s.qNorm
+	s.low, s.delta, s.sumQ = g.low, g.delta, g.sumQ
+	s.resid2 = g.resid2 * s.inv * s.inv
+	s.varQ = s.resid2 / float64(d)
 }
 
 // bind sets s to q against c, reusing s's buffers.
@@ -843,6 +930,9 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 // binding: Quantizer.Scorer rebinds a scorer to another hood's codes in
 // the same frame, and that hood has its own row count and representation.
 func (s *bitScorer) rowIP(row int) float64 {
+	if s.g != nil {
+		return s.globalIP(row)
+	}
 	off := row * s.words
 	var ones, weighted uint64
 	switch b := s.b; {
@@ -870,6 +960,24 @@ func (s *bitScorer) rowIP(row int) float64 {
 		}
 	}
 	return s.ipOf(ones, weighted)
+}
+
+// globalIP is rowIP for a global query: <x_b, Rq~> from the row's
+// nibbles through the query's two tables, less the row's <x_b, Rc>, over
+// ||q - c||.
+func (s *bitScorer) globalIP(row int) float64 {
+	f := s.b.fast
+	k, i, shift := row/32, row%32, uint(0)
+	if i >= 16 {
+		i, shift = i-16, 4
+	}
+	var lo, hi uint64
+	for g := range f.groups {
+		n := int(f.nibs[(k*f.groups+g)*16+i] >> shift & 0xF)
+		lo += uint64(s.g.lutLo[16*g+n])
+		hi += uint64(s.g.lutHi[16*g+n])
+	}
+	return (s.ipOf(uint64(f.ones[row]), lo+16*hi) - float64(f.xbc[row])) * s.inv
 }
 
 // ipOf is rowIP from a row's popcount and its weighted popcount
@@ -954,6 +1062,10 @@ func (s *bitScorer) estimate(row int, known bool, rip float64, bound bool) (floa
 func (s *bitScorer) scoreAll(scores, bounds []float32) {
 	rows := s.b.Rows()
 	f := s.b.fast
+	if s.g != nil && !s.dead && s.qNorm > 0 {
+		s.scoreAllGlobal(f, scores, bounds)
+		return
+	}
 	if f == nil || s.dead || len(s.lut) != 16*f.groups {
 		for r := range rows {
 			if bounds != nil {
@@ -979,6 +1091,27 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 			scores[r], bounds[r] = s.estimate(r, true, ip, true)
 		} else {
 			scores[r], _ = s.estimate(r, true, ip, false)
+		}
+	}
+}
+
+// scoreAllGlobal is scoreAll for a global query: two scans, one per
+// nibble of the query's eight-bit codes, give each row's Σ b_j code_j.
+func (s *bitScorer) scoreAllGlobal(f *fastLayout, scores, bounds []float32) {
+	n := 32 * f.blocks
+	if cap(s.sums) < 2*n {
+		s.sums = make([]uint16, 2*n)
+	}
+	lo, hi := s.sums[:n], s.sums[n:2*n]
+	simd.FastScan(f.nibs, s.g.lutLo, f.groups, f.blocks, lo)
+	simd.FastScan(f.nibs, s.g.lutHi, f.groups, f.blocks, hi)
+	for r := range scores {
+		w := uint64(lo[r]) + 16*uint64(hi[r])
+		rip := (s.ipOf(uint64(f.ones[r]), w) - float64(f.xbc[r])) * s.inv
+		if bounds != nil {
+			scores[r], bounds[r] = s.estimate(r, true, rip, true)
+		} else {
+			scores[r], _ = s.estimate(r, true, rip, false)
 		}
 	}
 }
@@ -1046,7 +1179,7 @@ func nextUp(x float32) float32 {
 func (b *Code) retained() int {
 	n := 0
 	if f := b.fast; f != nil {
-		n = len(f.nibs) + 2*len(f.ones) + 64 // norms and aligns: b.Norms, b.Aligns
+		n = len(f.nibs) + 2*len(f.ones) + 4*len(f.xbc) + 96 // norms and aligns: b.Norms, b.Aligns; rc is the caller's
 	}
 	if b.borrowed != nil {
 		return n // the probe entry already charges the raw column

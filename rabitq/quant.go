@@ -243,6 +243,76 @@ type Query struct {
 	// Rotated: ScorerRotated takes a column's residual as rotated minus the
 	// column's rotated centroid.
 	rotated []float32
+	// global is the rotated query quantized once (Global), or nil.
+	global *globalQuery
+}
+
+// globalQuery is a query rotated and quantized once, for every column it
+// scores (Scorer.BindGlobal): eight bits per dimension over the rotated
+// query's own range, x_j ~ low + delta*code_j, as two nibble tables per
+// scan group (the codes' low and high four bits), and the rounding
+// residual's squared norm.
+type globalQuery struct {
+	low, delta, sumQ, resid2 float64
+	qq                       float64 // ||rotated||^2
+	lutLo, lutHi             []byte
+}
+
+// Global is q rotated into rot's frame (Rotated) and quantized once to
+// eight bits, for Scorer.BindGlobal: a column then binds in O(1) work
+// beyond one dot product, where Scorer and ScorerRotated quantize the
+// query's residual to each column's centroid, O(dims) a column (25 us at
+// 768 dimensions, a third of a lookup's CPU). The query's rounding error,
+// relative to its distance from a column's centroid, is what the bound
+// carries (globalQuery.resid2).
+func (q Query) Global(rot *Rotation) Query {
+	q = q.Rotated(rot)
+	if q.rotated == nil {
+		return q
+	}
+	x := q.rotated
+	d := len(x)
+	groups := fastGroups(d)
+	if groups == 0 {
+		return q
+	}
+	g := &globalQuery{lutLo: make([]byte, 16*groups), lutHi: make([]byte, 16*groups)}
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, v := range x {
+		f := float64(v)
+		lo, hi = min(lo, f), max(hi, f)
+		g.qq += f * f
+	}
+	g.low, g.delta = lo, (hi-lo)/255
+	for j, v := range x {
+		f := float64(v)
+		code := 0
+		if g.delta > 0 {
+			y := (f - lo) / g.delta
+			t := math.Trunc(y)
+			if y-t >= 0.5 {
+				t++
+			}
+			code = min(255, max(0, int(t)))
+		}
+		g.sumQ += float64(code)
+		e := lo + g.delta*float64(code) - f
+		g.resid2 += e * e
+		g.lutLo[16*(j/4)+1<<(j%4)] = byte(code & 15)
+		g.lutHi[16*(j/4)+1<<(j%4)] = byte(code >> 4)
+	}
+	for _, lut := range [][]byte{g.lutLo, g.lutHi} {
+		for o := 0; o < len(lut); o += 16 {
+			t := lut[o : o+16 : o+16]
+			t[3] = t[1] + t[2]
+			t[5], t[6], t[7] = t[4]+t[1], t[4]+t[2], t[4]+t[3]
+			for n := 9; n < 16; n++ {
+				t[n] = t[8] + t[n-8]
+			}
+		}
+	}
+	q.global = g
+	return q
 }
 
 func NewQuery(q []float32, metric ivfq.Metric, rot *Rotation) Query {
@@ -348,6 +418,27 @@ func (s *Scorer) BindRotated(c *Quantizer, q Query, rc []float32) {
 		s.bit = new(bitScorer)
 	}
 	c.bind(s.bit, q, rc)
+}
+
+// BindGlobal binds s to c for q from Query.Global: per column, only the
+// query's distance to the column's centroid, ||q - c||, one dot product.
+// The column must be packed with its rotated centroid
+// (PackFastScanFrame). It reports false, and leaves s as it was, when the
+// query is not global, the column is not so packed, or the query's frame
+// is not the column's; the caller then binds with BindRotated.
+func (s *Scorer) BindGlobal(c *Quantizer, q Query) bool {
+	b := c.Code
+	f := b.fast
+	if q.global == nil || f == nil || f.xbc == nil || q.Rotation == nil || q.Rotation.seed != b.Seed ||
+		q.Rotation.dims != c.Dims || len(q.rotated) != c.Dims || b.Unit != (q.Metric == ivfq.Cosine) ||
+		(q.Metric != ivfq.L2 && q.Metric != ivfq.Cosine) {
+		return false
+	}
+	if s.bit == nil {
+		s.bit = new(bitScorer)
+	}
+	c.bindGlobal(s.bit, q)
+	return true
 }
 
 // Use is s = s.With(c) in place, without the copy.
