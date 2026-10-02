@@ -799,6 +799,9 @@ func TestSelectNearestMatchesSort(t *testing.T) {
 			cands[i] = rankedNode{id: rng.Intn(n + 1), d: float32(rng.Intn(50)) / 7}
 		}
 		probe := 1 + rng.Intn(40)
+		if trial%2 == 1 { // a beam in the hundreds, past n as often as not
+			probe = 1 + rng.Intn(700)
+		}
 		want := slices.Clone(cands)
 		slices.SortFunc(want, func(a, b rankedNode) int {
 			switch {

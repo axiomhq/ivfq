@@ -438,10 +438,58 @@ func scanRank(dims int, w *treeWorkspace, n *treeNode, ids []int, qq float32, q 
 // the rest. A beam search keeps sixteen of a few hundred at every level
 // of every assignment, and the full sort was 80% of a merge's CPU at 10M.
 // best is reused as the output buffer.
+//
+// It keeps a max-heap of the probe best, its root the worst kept, so a
+// candidate costs one comparison unless it enters: O(n log probe). The
+// sorted buffer insertNearest keeps is O(n * probe) when most candidates
+// enter, as at a default query's beam — 547 of 5,464 leaves at 1M rows in
+// hoods of 256 took 1.7 ms a query.
 func selectNearest(best, cands []rankedNode, probe int) []rankedNode {
-	for _, c := range cands {
-		best = insertNearest(best, c, probe)
+	best = best[:0]
+	if probe <= 0 {
+		return best
 	}
+	for _, c := range cands {
+		if len(best) < probe {
+			best = append(best, c)
+			for i := len(best) - 1; i > 0; {
+				p := (i - 1) / 2
+				if !best[p].before(best[i]) {
+					break
+				}
+				best[p], best[i] = best[i], best[p]
+				i = p
+			}
+			continue
+		}
+		if !c.before(best[0]) {
+			continue
+		}
+		best[0] = c
+		for i, n := 0, len(best); ; {
+			w, l, r := i, 2*i+1, 2*i+2
+			if l < n && best[w].before(best[l]) {
+				w = l
+			}
+			if r < n && best[w].before(best[r]) {
+				w = r
+			}
+			if w == i {
+				break
+			}
+			best[w], best[i] = best[i], best[w]
+			i = w
+		}
+	}
+	slices.SortFunc(best, func(a, b rankedNode) int {
+		switch {
+		case a.before(b):
+			return -1
+		case b.before(a):
+			return 1
+		}
+		return 0
+	})
 	return best
 }
 
