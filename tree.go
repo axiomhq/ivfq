@@ -9,6 +9,7 @@ import (
 	"github.com/axiomhq/ivfq/kmeans"
 	"math"
 	"slices"
+	"sync"
 )
 
 type treeNode struct {
@@ -277,14 +278,20 @@ func (t Tree) nearest(q []float32, probe int) ([]int, int) {
 	if t.root < 0 || probe <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
-	w := treeWorkspace{next: make([]rankedNode, 0, min(t.fanout, len(t.nodes))), best: make([]rankedNode, 0, probe)}
-	best, evals := t.nearestInto(&w, q, probe, probe)
+	w := workspaces.Get().(*treeWorkspace)
+	defer workspaces.Put(w)
+	best, evals := t.nearestInto(w, q, probe, probe)
 	out := make([]int, len(best))
 	for i, x := range best {
 		out[i] = x.id
 	}
 	return out, evals
 }
+
+// workspaces lends nearest its scratch: a query's leaf scan collects a
+// candidate per scanned leaf, every leaf at a wide beam, and growing that
+// afresh per query was most of a 5,464-leaf search's cost in copies and GC.
+var workspaces = sync.Pool{New: func() any { return new(treeWorkspace) }}
 
 func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]rankedNode, int) {
 	if t.root < 0 || beam <= 0 || count <= 0 || len(q) != t.dims {
