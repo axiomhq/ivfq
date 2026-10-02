@@ -197,7 +197,18 @@ func (t Tree) Nearest(q []float32, probe int) []int {
 }
 
 // Evaluations is Nearest with the number of centroid distance evaluations.
-func (t Tree) Evaluations(q []float32, probe int) ([]int, int) { return t.nearest(q, probe) }
+func (t Tree) Evaluations(q []float32, probe int) ([]int, int) { return t.nearestBeam(q, probe, probe) }
+
+// EvaluationsBeam is Evaluations with the beam set apart from probe: the
+// search keeps beam nodes per level and ranks every leaf under them, so a
+// beam of probe scans every leaf once probe exceeds the root's fanout (all
+// 5,464 at 1M rows in hoods of 256, for 96 probes). Leaves are ranked
+// exactly; a narrower beam can only miss a leaf under a node it dropped.
+// beam below probe is raised to... nothing: it may be smaller than probe,
+// and the result is still the probe nearest leaves the beam reached.
+func (t Tree) EvaluationsBeam(q []float32, beam, probe int) ([]int, int) {
+	return t.nearestBeam(q, beam, probe)
+}
 
 // Searcher is Nearest, Assign and TwoStageAssign with scratch that
 // survives between calls: a warm Searcher allocates nothing per query. It
@@ -274,13 +285,15 @@ func (w *treeWorkspace) dotsOf(q, block []float32, n int) []float32 {
 	return w.dots
 }
 
-func (t Tree) nearest(q []float32, probe int) ([]int, int) {
-	if t.root < 0 || probe <= 0 || len(q) != t.dims {
+func (t Tree) nearest(q []float32, probe int) ([]int, int) { return t.nearestBeam(q, probe, probe) }
+
+func (t Tree) nearestBeam(q []float32, beam, probe int) ([]int, int) {
+	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
 	w := workspaces.Get().(*treeWorkspace)
 	defer workspaces.Put(w)
-	best, evals := t.nearestInto(w, q, probe, probe)
+	best, evals := t.nearestInto(w, q, beam, probe)
 	out := make([]int, len(best))
 	for i, x := range best {
 		out[i] = x.id

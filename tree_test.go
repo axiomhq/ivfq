@@ -1330,3 +1330,30 @@ func runAssignPass(b *testing.B, fx *beamFixture, assign func(*Searcher, []float
 	b.ReportMetric(ratioSum/float64(ratioN), "dist-ratio")
 	b.ReportMetric(float64(neg)/rows*100, "neg%")
 }
+
+// EvaluationsBeam at beam = probe is Evaluations. Narrower, it evaluates
+// fewer centroids and still returns probe leaves, nearest first by their
+// exact distance, ties by id.
+func TestEvaluationsBeam(t *testing.T) {
+	v := treeData(5000, 16)
+	tree := mustBuild(v, 100)
+	for qi, q := range treeData(30, 16) {
+		const probe = 96
+		want, wantEvals := tree.Evaluations(q, probe)
+		got, gotEvals := tree.EvaluationsBeam(q, probe, probe)
+		if !slices.Equal(got, want) || gotEvals != wantEvals {
+			t.Fatalf("query %d: beam = probe gave %v (%d evals), Evaluations %v (%d)", qi, got, gotEvals, want, wantEvals)
+		}
+		narrow, evals := tree.EvaluationsBeam(q, 24, probe)
+		if len(narrow) != probe || evals >= wantEvals {
+			t.Fatalf("query %d: beam 24 gave %d leaves in %d evals, beam %d took %d", qi, len(narrow), evals, probe, wantEvals)
+		}
+		d := func(id int) float64 { return float64(Dot(q, q)) + float64(Dot(v[id], v[id])) - 2*float64(Dot(q, v[id])) }
+		for i := 1; i < len(narrow); i++ {
+			a, b := d(narrow[i-1]), d(narrow[i])
+			if float32(a) > float32(b)+1e-3 {
+				t.Fatalf("query %d: leaf %d at %v ranked before leaf %d at %v", qi, narrow[i-1], a, narrow[i], b)
+			}
+		}
+	}
+}
