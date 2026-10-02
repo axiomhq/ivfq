@@ -148,9 +148,14 @@ func fastGroups(dims int) int {
 // PackFastScan lays the column's rows out for Scorer.ScoreAll's batched
 // scan, which then scores 32 rows per table lookup instead of a row at a
 // time: about 1 ns a row against 28 for the popcount product alone, at
-// 128 dimensions. It costs as much memory again as the bits. It writes
-// the column, so call it before the column is shared; packing twice is a
-// no-op, and a column too wide for the scan stays unpacked.
+// 128 dimensions. The packed rows replace the column's bits: it stops
+// aliasing a borrowed input (UnmarshalBinaryBorrowed, UnmarshalRowsBorrowed)
+// and holds about what it did, so a cache of columns holds as many. Kept
+// beside the bits, they cost as much memory again, and at 10M rows in a
+// 1 GiB cache that tripled a warm query (753 loads a query against 37).
+// Every method still works on a packed column. It writes the column, so
+// call it before the column is shared; packing twice is a no-op, and a
+// column too wide for the scan stays unpacked.
 func (c *Quantizer) PackFastScan() {
 	b := c.Code
 	groups := fastGroups(b.width())
@@ -181,6 +186,17 @@ func (c *Quantizer) PackFastScan() {
 		f.ones[r] = uint16(ones)
 		f.norms[r], f.aligns[r] = b.norm(r), b.align(r)
 	}
+	if b.borrowed != nil && b.cOff > 0 {
+		// The centroid lives in the borrowed bytes: keep a copy. A
+		// centroid the caller handed in (cOff 0) is already b.Centroid.
+		c := make([]float32, b.dims)
+		for i := range c {
+			c[i] = b.centroid(i)
+		}
+		b.Centroid = c
+	}
+	b.Norms, b.Aligns = f.norms, f.aligns
+	b.Words, b.borrowed, b.cOff = nil, nil, 0
 	b.fast = f
 }
 
@@ -227,7 +243,30 @@ func (b *Code) word(i int) uint64 {
 	if b.borrowed != nil {
 		return binary.LittleEndian.Uint64(b.borrowed[bitsHeader+b.cOff+8*b.rows+8*i:])
 	}
+	if b.Words == nil && b.fast != nil {
+		return b.fast.word(i, bitWords(b.width()))
+	}
 	return b.Words[i]
+}
+
+// word is word i of a packed column (words per row): its 16 nibbles,
+// reassembled. Cold paths only (marshal, Select, AppendRows); scoring
+// reads the nibbles.
+func (f *fastLayout) word(i, words int) uint64 {
+	r, w := i/words, i%words
+	k, j, shift := r/32, r%32, uint(0)
+	if j >= 16 {
+		j, shift = j-16, 4
+	}
+	var x uint64
+	for n := range 16 {
+		g := w*16 + n
+		if g >= f.groups {
+			break
+		}
+		x |= uint64(f.nibs[(k*f.groups+g)*16+j]>>shift&0xF) << (4 * n)
+	}
+	return x
 }
 
 // quantizeBits encodes vectors as 1-bit residuals to their own mean.
@@ -431,7 +470,7 @@ func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
 		return bytes.Clone(b.borrowed), nil
 	}
 	rows, w := b.Rows(), bitWords(dims)
-	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || len(b.Words) != rows*w) {
+	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || b.fast == nil && len(b.Words) != rows*w) {
 		return nil, fmt.Errorf("quant: inconsistent 1-bit codes")
 	}
 	var out bytes.Buffer
@@ -802,10 +841,29 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 func (s *bitScorer) rowIP(row int) float64 {
 	off := row * s.words
 	var ones, weighted uint64
-	if b := s.b; b.borrowed != nil {
+	switch b := s.b; {
+	case b.borrowed != nil:
 		ones, weighted = simd.BitProductBytes(b.borrowed[bitsHeader+b.cOff+8*b.rows+8*off:], s.planes, s.words)
-	} else {
+	case b.Words != nil:
 		ones, weighted = simd.BitProductWords(b.Words[off:off+s.words], s.planes)
+	default: // packed: Σ_j b_j code_j is the row's table entries summed
+		f := b.fast
+		k, i, shift := row/32, row%32, uint(0)
+		if i >= 16 {
+			i, shift = i-16, 4
+		}
+		ones = uint64(f.ones[row])
+		if len(s.lut) == 16*f.groups {
+			for g := range f.groups {
+				weighted += uint64(s.lut[16*g+int(f.nibs[(k*f.groups+g)*16+i]>>shift&0xF)])
+			}
+		} else {
+			words := make([]uint64, s.words)
+			for w := range words {
+				words[w] = f.word(off+w, s.words)
+			}
+			ones, weighted = simd.BitProductWords(words, s.planes)
+		}
 	}
 	return s.ipOf(ones, weighted)
 }
@@ -984,7 +1042,7 @@ func nextUp(x float32) float32 {
 func (b *Code) retained() int {
 	n := 0
 	if f := b.fast; f != nil {
-		n = len(f.nibs) + 10*len(f.ones) + 96
+		n = len(f.nibs) + 2*len(f.ones) + 64 // norms and aligns: b.Norms, b.Aligns
 	}
 	if b.borrowed != nil {
 		return n // the probe entry already charges the raw column

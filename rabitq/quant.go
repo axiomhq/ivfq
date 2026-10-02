@@ -102,7 +102,7 @@ func (c Quantizer) Select(rows []int) (Quantizer, error) {
 		if r < 0 || r >= b.Rows() {
 			return Quantizer{}, fmt.Errorf("quant: row %d out of range for a %d-row column", r, b.Rows())
 		}
-		if b.borrowed != nil {
+		if b.borrowed != nil || b.Words == nil {
 			for i := 0; i < w; i++ {
 				out.Words[j*w+i] = b.word(r*w + i)
 			}
@@ -149,7 +149,7 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 			out.Centroid[i] = b.centroid(i)
 		}
 	}
-	if b.borrowed != nil {
+	if b.borrowed != nil || b.Words == nil {
 		for i := 0; i < rows*w; i++ {
 			out.Words[i] = b.word(i)
 		}

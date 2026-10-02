@@ -1,6 +1,7 @@
 package rabitq
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"testing"
@@ -188,4 +189,77 @@ func TestBindRotatedReusesNothingStale(t *testing.T) {
 	s.BindRotated(&c, NewQuery(v[2], ivfq.L2, rot), nil)
 	s.Use(&other)
 	checkScoreAll(t, "use", s, 40)
+}
+
+// Packing replaces a column's bits: every score, bound, the marshalled
+// bytes, a Select of its rows and its frame are what they were before,
+// on typed and borrowed columns, widths not a multiple of 4 or 64, row
+// counts either side of a block, both metrics and a zero row.
+func TestPackedColumnIsTheColumn(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		for _, dims := range []int{7, 100, 128, 130} {
+			for _, rows := range []int{1, 31, 33, 100} {
+				v := corpus(rows, dims)
+				if rows > 5 {
+					v[5] = make([]float32, dims)
+				}
+				rot := NewRotation(13, dims)
+				c, err := Quantize(v, Options{Metric: metric, Rotation: rot})
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := c.MarshalBinary()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, kind := range []string{"typed", "borrowed"} {
+					name := fmt.Sprintf("%v/d%d/r%d/%s", metric, dims, rows, kind)
+					col, err := UnmarshalBinary(raw)
+					if kind == "borrowed" {
+						col, err = UnmarshalBinaryBorrowed(bytes.Clone(raw))
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					ref, err := UnmarshalBinary(raw) // never packed
+					if err != nil {
+						t.Fatal(err)
+					}
+					pq := NewQuery(corpus(1, dims)[0], metric, rot)
+					wantS, wantB := make([]float32, rows), make([]float32, rows)
+					ref.Scorer(pq).ScoreAll(wantS, wantB)
+					col.PackFastScan()
+					s := col.Scorer(pq)
+					gotS, gotB := make([]float32, rows), make([]float32, rows)
+					s.ScoreAll(gotS, gotB)
+					for r := range rows {
+						rs, rb := s.ScoreAndBound(r)
+						for _, pair := range [][2]float32{{gotS[r], wantS[r]}, {gotB[r], wantB[r]}, {rs, wantS[r]}, {rb, wantB[r]}} {
+							if math.Float32bits(pair[0]) != math.Float32bits(pair[1]) {
+								t.Fatalf("%s row %d: packed %v/%v (row path %v/%v), unpacked %v/%v", name, r, gotS[r], gotB[r], rs, rb, wantS[r], wantB[r])
+							}
+						}
+					}
+					again, err := col.MarshalBinary()
+					if err != nil || !bytes.Equal(again, raw) {
+						t.Fatalf("%s: packed column marshals differently (%v)", name, err)
+					}
+					sel := []int{rows - 1, 0}
+					a, errA := col.Select(sel)
+					b, errB := ref.Select(sel)
+					if errA != nil || errB != nil {
+						t.Fatal(errA, errB)
+					}
+					ab, _ := a.MarshalBinary()
+					bb, _ := b.MarshalBinary()
+					if !bytes.Equal(ab, bb) {
+						t.Fatalf("%s: Select of the packed column differs", name)
+					}
+					if !col.SameFrame(&ref) || !ref.SameFrame(&col) {
+						t.Fatalf("%s: packing changed the column's frame", name)
+					}
+				}
+			}
+		}
+	}
 }
