@@ -575,7 +575,7 @@ type bitScorer struct {
 	l2     bool
 }
 
-func (c *Quantizer) newBitScorer(q Query) *bitScorer {
+func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	b := c.Code
 	d := c.Dims
 	s := &bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
@@ -597,24 +597,32 @@ func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 		s.dead, s.exact = true, true
 		return s
 	}
+	if b.Unit && q.invNorm == 0 {
+		s.dead = true
+		return s
+	}
 	resid := make([]float32, d)
-	copy(resid, q.Vector[:d])
-	if b.Unit {
-		if q.invNorm == 0 {
-			s.dead = true
-			return s
-		}
-		inv := float32(q.invNorm)
-		for j := range resid {
-			resid[j] *= inv
-		}
-	}
 	var n float64
-	for j := range resid {
-		resid[j] -= b.centroid(j)
-		n += float64(resid[j]) * float64(resid[j])
+	if rc != nil && q.rotated != nil {
+		// Rotated: R(q-c) = Rq - Rc, no rotation per column.
+		for j := range resid {
+			resid[j] = q.rotated[j] - rc[j]
+			n += float64(resid[j]) * float64(resid[j])
+		}
+	} else {
+		copy(resid, q.Vector[:d])
+		if b.Unit {
+			inv := float32(q.invNorm)
+			for j := range resid {
+				resid[j] *= inv
+			}
+		}
+		for j := range resid {
+			resid[j] -= b.centroid(j)
+			n += float64(resid[j]) * float64(resid[j])
+		}
+		q.Rotation.Apply(resid)
 	}
-	q.Rotation.Apply(resid)
 	s.qNorm = math.Sqrt(n)
 	if s.qNorm == 0 {
 		return s // the query IS the centroid: every row's distance is its own norm

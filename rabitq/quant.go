@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/axiomhq/ivfq"
 	"math"
+	"slices"
 )
 
 // Quantizer is one cluster's candidate column: one Code row per vector,
@@ -238,6 +239,10 @@ type Query struct {
 	// error; 0 is the default, boundSigmas.
 	Sigmas  float64
 	invNorm float64 // 0 for a zero cosine query, which scores 0 everywhere
+	// rotated is the query (unit, for cosine) in Rotation's frame, set by
+	// Rotated: ScorerRotated takes a column's residual as rotated minus the
+	// column's rotated centroid.
+	rotated []float32
 }
 
 func NewQuery(q []float32, metric ivfq.Metric, rot *Rotation) Query {
@@ -266,7 +271,51 @@ type Scorer struct {
 }
 
 // Scorer prepares q against this column.
-func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q)} }
+func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q, nil)} }
+
+// Rotated is q bound to rot with the query rotated once: a rotation is
+// linear, so a column's rotated residual R(q-c) is Rq - Rc, and a scorer
+// bound through ScorerRotated with the column's RotateCentroid does
+// O(dims) work per column where Scorer rotates the residual of each (a
+// lookup that probes hundreds of small clusters rotated its query
+// hundreds of times).
+func (q Query) Rotated(rot *Rotation) Query {
+	q.Rotation = rot
+	if rot == nil || len(q.Vector) < rot.dims {
+		q.rotated = nil
+		return q
+	}
+	v := make([]float32, rot.dims)
+	copy(v, q.Vector[:rot.dims])
+	if q.Metric == ivfq.Cosine && q.invNorm != 0 {
+		inv := float32(q.invNorm)
+		for j := range v {
+			v[j] *= inv
+		}
+	}
+	rot.Apply(v)
+	q.rotated = v
+	return q
+}
+
+// RotateCentroid is c in rot's frame, what ScorerRotated takes for a
+// column encoded against c: compute it once per cluster, not per query.
+func RotateCentroid(c []float32, rot *Rotation) []float32 {
+	v := slices.Clone(c)
+	rot.Apply(v)
+	return v
+}
+
+// ScorerRotated is Scorer for a query from Rotated and the column's
+// centroid in the same frame (RotateCentroid), its residual Rq - Rc. It
+// scores as Scorer does, up to float rounding of the residual. A query
+// not from Rotated, or rc of another width, binds as Scorer.
+func (c *Quantizer) ScorerRotated(q Query, rc []float32) Scorer {
+	if q.rotated == nil || len(rc) != c.Dims {
+		rc = nil
+	}
+	return Scorer{bit: c.newBitScorer(q, rc)}
+}
 
 // Rebind is Scorer for a column in the same frame as the one s was built
 // on (same centroid, rotation and metric): the query-side work is reused

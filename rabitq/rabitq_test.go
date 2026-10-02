@@ -653,3 +653,44 @@ func bitsEqual(a, b []float32) bool {
 }
 
 // applyBlock is Apply on each row of the block, bit for bit.
+
+// TestScorerRotatedMatchesScorer: a scorer bound with the query rotated
+// once and the column's rotated centroid (Rq - Rc) scores and bounds as
+// one that rotates the residual (R(q-c)), up to float rounding, for l2 and
+// cosine; rounding may move a 4-bit query code at its boundary, so a few
+// rows may differ, by little.
+func TestScorerRotatedMatchesScorer(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		vectors := corpus(256, 129)
+		c := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
+		rot := rotOf(c)
+		rc := RotateCentroid(c.Code.Centroid, rot)
+		rows, off := 0, 0
+		for _, qi := range []int{1, 50, 200} {
+			q := NewQuery(vectors[qi], metric, rot)
+			plain, rotated := c.Scorer(q), c.ScorerRotated(q.Rotated(rot), rc)
+			for row := 0; row < c.Rows(); row++ {
+				ps, pb := plain.ScoreAndBound(row)
+				rs, rb := rotated.ScoreAndBound(row)
+				rows++
+				tol := 1e-4 * max(1, abs32(ps))
+				if abs32(ps-rs) > tol || abs32(pb-rb) > tol {
+					off++
+					if abs32(ps-rs) > 0.05*max(1, abs32(ps)) {
+						t.Fatalf("%s q%d row %d: score %v rotated %v", metric, qi, row, ps, rs)
+					}
+				}
+			}
+		}
+		if off*100 > rows {
+			t.Fatalf("%s: %d of %d rows score differently once rotated", metric, off, rows)
+		}
+	}
+}
+
+func abs32(x float32) float32 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
