@@ -1348,7 +1348,9 @@ func TestEvaluationsBeam(t *testing.T) {
 		if len(narrow) != probe || evals >= wantEvals {
 			t.Fatalf("query %d: beam 24 gave %d leaves in %d evals, beam %d took %d", qi, len(narrow), evals, probe, wantEvals)
 		}
-		d := func(id int) float64 { return float64(Dot(q, q)) + float64(Dot(v[id], v[id])) - 2*float64(Dot(q, v[id])) }
+		d := func(id int) float64 {
+			return float64(Dot(q, q)) + float64(Dot(v[id], v[id])) - 2*float64(Dot(q, v[id]))
+		}
 		for i := 1; i < len(narrow); i++ {
 			a, b := d(narrow[i-1]), d(narrow[i])
 			if float32(a) > float32(b)+1e-3 {
