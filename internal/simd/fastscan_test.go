@@ -82,3 +82,29 @@ func BenchmarkFastScan(b *testing.B) {
 		FastScan(nibs, lut, groups, blocks, out)
 	}
 }
+
+// FastScan2 is FastScan with each table, on every shape and two different
+// tables (a swapped output or a shared table would show).
+func TestFastScan2MatchesFastScan(t *testing.T) {
+	rng := rand.New(rand.NewPCG(9, 4))
+	for _, groups := range []int{2, 4, 32, 34, 200} {
+		for _, blocks := range []int{0, 1, 3} {
+			nibs := make([]byte, blocks*groups*16)
+			for i := range nibs {
+				nibs[i] = byte(rng.IntN(256))
+			}
+			a, b := make([]byte, groups*16), make([]byte, groups*16)
+			for i := range a {
+				a[i], b[i] = byte(rng.IntN(61)), byte(rng.IntN(61))
+			}
+			gotA, gotB := make([]uint16, blocks*32), make([]uint16, blocks*32)
+			wantA, wantB := make([]uint16, blocks*32), make([]uint16, blocks*32)
+			FastScan2(nibs, a, b, groups, blocks, gotA, gotB)
+			fastScanGeneric(nibs, a, groups, blocks, wantA)
+			fastScanGeneric(nibs, b, groups, blocks, wantB)
+			if !slices.Equal(gotA, wantA) || !slices.Equal(gotB, wantB) {
+				t.Fatalf("groups=%d blocks=%d", groups, blocks)
+			}
+		}
+	}
+}

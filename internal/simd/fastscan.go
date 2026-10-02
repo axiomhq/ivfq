@@ -46,3 +46,17 @@ func fastScanGeneric(nibs, lut []byte, groups, blocks int, out []uint16) {
 		}
 	}
 }
+
+// FastScan2 is FastScan with two tables over one read of nibs: outA from
+// lutA, outB from lutB. A query quantized to eight bits scores through two
+// nibble tables (its codes' low and high halves).
+func FastScan2(nibs, lutA, lutB []byte, groups, blocks int, outA, outB []uint16) {
+	if groups <= 0 || groups%2 != 0 || groups > FastScanMaxGroups || len(nibs) != blocks*groups*16 ||
+		len(lutA) != groups*16 || len(lutB) != groups*16 || len(outA) != blocks*32 || len(outB) != blocks*32 {
+		panic("simd: FastScan2 shape")
+	}
+	if blocks == 0 {
+		return
+	}
+	fastScan2(nibs, lutA, lutB, groups, blocks, outA, outB)
+}

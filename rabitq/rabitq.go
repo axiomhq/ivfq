@@ -1095,23 +1095,57 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 	}
 }
 
-// scoreAllGlobal is scoreAll for a global query: two scans, one per
-// nibble of the query's eight-bit codes, give each row's Σ b_j code_j.
+// scoreAllGlobal is scoreAll for a global query: one scan over the rows'
+// nibbles through the query's two tables (its codes' low and high halves)
+// gives each row's Σ b_j code_j.
 func (s *bitScorer) scoreAllGlobal(f *fastLayout, scores, bounds []float32) {
 	n := 32 * f.blocks
 	if cap(s.sums) < 2*n {
 		s.sums = make([]uint16, 2*n)
 	}
 	lo, hi := s.sums[:n], s.sums[n:2*n]
-	simd.FastScan(f.nibs, s.g.lutLo, f.groups, f.blocks, lo)
-	simd.FastScan(f.nibs, s.g.lutHi, f.groups, f.blocks, hi)
+	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	if bounds == nil {
+		s.scoreFastGlobal(f, lo, hi, scores)
+		return
+	}
 	for r := range scores {
 		w := uint64(lo[r]) + 16*uint64(hi[r])
 		rip := (s.ipOf(uint64(f.ones[r]), w) - float64(f.xbc[r])) * s.inv
-		if bounds != nil {
-			scores[r], bounds[r] = s.estimate(r, true, rip, true)
+		scores[r], bounds[r] = s.estimate(r, true, rip, true)
+	}
+}
+
+// scoreFastGlobal is scoreFast for a global query: estimate(r, true, rip,
+// false) inlined, rip as scoreAllGlobal computes it, the same operations
+// in the same order (TestGlobalScoreAllMatchesRowByRow).
+func (s *bitScorer) scoreFastGlobal(f *fastLayout, lo, hi []uint16, scores []float32) {
+	qn, low, delta, scale, inv := s.qNorm, s.low, s.delta, s.scale, s.inv
+	q2 := qn * qn
+	tail := s.delta*s.sumQ + float64(s.dims)*s.low
+	norms, aligns, ones, xbc := f.norms[:len(scores)], f.aligns[:len(scores)], f.ones[:len(scores)], f.xbc[:len(scores)]
+	lo, hi = lo[:len(scores)], hi[:len(scores)]
+	for r := range scores {
+		align := float64(aligns[r])
+		if align == zeroRowAlign {
+			scores[r] = 0
+			continue
+		}
+		norm := float64(norms[r])
+		dist2 := norm*norm + q2
+		if norm > 0 && qn > 0 && align > 0 {
+			w := float64(uint64(lo[r]) + 16*uint64(hi[r]))
+			dot := 2*(delta*w+low*float64(ones[r])) - tail
+			rip := (dot*scale - float64(xbc[r])) * inv
+			ip := rip / align
+			dist2 -= 2 * norm * qn * ip
+		}
+		gap := norm - qn
+		dist2 = max(dist2, gap*gap)
+		if s.l2 {
+			scores[r] = float32(-dist2)
 		} else {
-			scores[r], _ = s.estimate(r, true, rip, false)
+			scores[r] = float32(min(1, max(-1, 1-dist2/2)))
 		}
 	}
 }

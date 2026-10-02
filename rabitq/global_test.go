@@ -156,3 +156,34 @@ func TestGlobalBoundCoversAtItsConfidence(t *testing.T) {
 		}
 	}
 }
+
+// A hood's whole cost, bind and score, per column bound (BindRotated) and
+// global (BindGlobal), 256 rows.
+func BenchmarkHoodBindAndScore(b *testing.B) {
+	for _, dims := range []int{128, 768} {
+		v := offCentre(256, dims, 5)
+		c, rot := globalColumn(b, v, ivfq.L2)
+		cent := make([]float32, dims)
+		for i := range cent {
+			cent[i] = c.Code.centroid(i)
+		}
+		rc := RotateCentroid(cent, rot)
+		q := offCentre(1, dims, 6)[0]
+		scores := make([]float32, 256)
+		var s Scorer
+		b.Run(fmt.Sprintf("rotated/%d", dims), func(b *testing.B) {
+			rq := NewQuery(q, ivfq.L2, rot).Rotated(rot)
+			for b.Loop() {
+				s.BindRotated(&c, rq, rc)
+				s.ScoreAll(scores, nil)
+			}
+		})
+		b.Run(fmt.Sprintf("global/%d", dims), func(b *testing.B) {
+			gq := NewQuery(q, ivfq.L2, rot).Global(rot)
+			for b.Loop() {
+				s.BindGlobal(&c, gq)
+				s.ScoreAll(scores, nil)
+			}
+		})
+	}
+}
