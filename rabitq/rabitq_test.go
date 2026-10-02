@@ -742,3 +742,24 @@ func BenchmarkScorerBind(b *testing.B) {
 		_ = c.ScorerRotated(rq, rc)
 	}
 }
+
+// newBitScorer rounds with Trunc and a half test: math.Round on every
+// non-negative input, including halves, the float just below a half, and
+// values past 2^52 where every float is an integer.
+func TestTruncRoundIsRound(t *testing.T) {
+	ys := []float64{0, 0.5, 1.5, 2.5, 14.5, 15, math.Nextafter(0.5, 0), math.Nextafter(0.5, 1),
+		math.Nextafter(14.5, 0), 1 << 52, 1<<52 + 1, 1 << 53}
+	r := rand.New(rand.NewSource(2))
+	for range 100000 {
+		ys = append(ys, r.Float64()*16)
+	}
+	for _, y := range ys {
+		tr := math.Trunc(y)
+		if y-tr >= 0.5 {
+			tr++
+		}
+		if tr != math.Round(y) {
+			t.Fatalf("y=%v: %v, math.Round %v", y, tr, math.Round(y))
+		}
+	}
+}

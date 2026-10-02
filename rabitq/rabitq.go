@@ -676,7 +676,13 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 		s.dead = true
 		return s
 	}
-	resid := make([]float32, d)
+	var residBuf [512]float32 // on the stack: resid does not escape
+	resid := residBuf[:0]
+	if d <= len(residBuf) {
+		resid = residBuf[:d]
+	} else {
+		resid = make([]float32, d)
+	}
 	var n float64
 	if rc != nil && q.rotated != nil {
 		// Rotated: R(q-c) = Rq - Rc, no rotation per column.
@@ -724,11 +730,25 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	s.planes = make([]uint64, queryBits*s.words)
 	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
 	var sumQ, resid2 float64
+	// The scan's tables take each code straight into its single-bit
+	// entry (16g + 1<<i for dimension 4g+i); the sums fill the rest after.
+	if groups := fastGroups(d); groups > 0 {
+		s.lut = make([]byte, 16*groups)
+	}
+	lut := s.lut
 	for j := range resid {
 		x := float64(resid[j]) * inv
 		code := 0
 		if delta > 0 {
-			code = int(math.Round((x - lo) / delta))
+			// math.Round, exactly, for y >= 0 (x >= lo): Trunc is one
+			// instruction where Round is a bit-twiddling call, and
+			// y - Trunc(y) is exact.
+			y := (x - lo) / delta
+			t := math.Trunc(y)
+			if y-t >= 0.5 {
+				t++
+			}
+			code = int(t)
 			code = min(queryLevels, max(0, code))
 		}
 		sumQ += float64(code)
@@ -740,21 +760,17 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 		p1[w] |= (c >> 1 & 1) << sh
 		p2[w] |= (c >> 2 & 1) << sh
 		p3[w] |= (c >> 3 & 1) << sh
+		if lut != nil {
+			lut[16*(j/4)+1<<(j%4)] = byte(code)
+		}
 	}
 	s.sumQ, s.resid2 = sumQ, resid2
-	if groups := fastGroups(d); groups > 0 {
-		s.lut = make([]byte, 16*groups)
-		for g := range groups {
-			var c [4]byte
-			for i := range 4 {
-				if j := 4*g + i; j < d {
-					c[i] = byte(p0[j/64]>>(j%64)&1 | (p1[j/64]>>(j%64)&1)<<1 | (p2[j/64]>>(j%64)&1)<<2 | (p3[j/64]>>(j%64)&1)<<3)
-				}
-			}
-			t := s.lut[16*g : 16*g+16]
-			for n := 1; n < 16; n++ {
-				t[n] = t[n&(n-1)] + c[bits.TrailingZeros(uint(n))]
-			}
+	for g := 0; g < len(lut); g += 16 {
+		t := lut[g : g+16 : g+16]
+		t[3] = t[1] + t[2]
+		t[5], t[6], t[7] = t[4]+t[1], t[4]+t[2], t[4]+t[3]
+		for n := 9; n < 16; n++ {
+			t[n] = t[8] + t[n-8]
 		}
 	}
 	s.varQ = s.resid2 / float64(d)
