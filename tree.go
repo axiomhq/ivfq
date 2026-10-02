@@ -29,6 +29,8 @@ type treeNode struct {
 	// and a sqrt per candidate.
 	block []float32
 	norms []float32
+	// i8 is a leaf holder's leaves as int8 (QuantizeI8), or nil.
+	i8 *nodeI8
 }
 
 // Tree is a deterministic hierarchy over a set of leaf centroids.
@@ -271,6 +273,13 @@ type treeWorkspace struct {
 	active, holders []int
 	next, best      []rankedNode
 	dots            []float32
+	// EvaluationsBeamI8's: the int8 query, a holder's int8 dot products,
+	// and per scanned leaf its bound and float32 norm; its result.
+	q8    []int8
+	dots8 []int32
+	slack []float64
+	lnorm []float32
+	out8  []rankedNode
 }
 
 // dots returns q's dot product with each of the first n rows of block,
@@ -749,6 +758,7 @@ func (t Tree) Clone() Tree {
 // holder, so correctness holds and quality degrades slowly; rebuild once
 // enough upserts have accumulated.
 func (t *Tree) Upsert(id int, v []float32) error {
+	t.dropI8()
 	if len(t.nodes) == 0 && len(t.leaves) == 0 {
 		// An empty tree adopts v's dimensions: Build over no centroids
 		// leaves them unset.
@@ -776,6 +786,7 @@ func (t *Tree) Upsert(id int, v []float32) error {
 // from its holder. Internal centroids stay, as they do under Upsert, and
 // a holder may be left empty; the next Build rebalances.
 func (t *Tree) Truncate(n int) error {
+	t.dropI8()
 	if n < 0 || n > len(t.leaves) {
 		return fmt.Errorf("ivf: truncate to %d of %d leaves", n, len(t.leaves))
 	}

@@ -1357,3 +1357,70 @@ func TestEvaluationsBeam(t *testing.T) {
 		}
 	}
 }
+
+// EvaluationsBeamI8 is EvaluationsBeam, leaf for leaf and in order, on
+// every query: widths with an int8 tail, beams from narrow to every
+// holder, a probe past the tree, duplicated leaves (ties by id), a query
+// on a leaf and the zero query; after an Upsert (the int8 copies dropped)
+// and on a Clone (never copied). It computes far fewer float32 distances
+// than the leaves it scans.
+func TestEvaluationsBeamI8IsEvaluationsBeam(t *testing.T) {
+	for _, dims := range []int{16, 100, 128, 768} {
+		v := treeData(3000, dims)
+		for i := 0; i < 30; i++ {
+			v[200+i] = v[i]
+		}
+		tree := mustBuild(v, 100)
+		tree.QuantizeI8()
+		qs := append(treeData(60, dims), v[7], make([]float32, dims))
+		var exact, scanned int
+		check := func(name string, tr Tree) {
+			for qi, q := range qs {
+				for _, c := range [][2]int{{16, 96}, {4, 50}, {200, 400}, {16, 1}, {16, 5000}} {
+					want, all := tr.EvaluationsBeam(q, c[0], c[1])
+					got, e := tr.EvaluationsBeamI8(q, c[0], c[1])
+					if !slices.Equal(got, want) {
+						t.Fatalf("%s dims %d query %d beam %d probe %d:\n got %v\nwant %v", name, dims, qi, c[0], c[1], got, want)
+					}
+					exact, scanned = exact+e, scanned+all
+				}
+			}
+		}
+		check("quantized", tree)
+		if exact*3 > scanned {
+			t.Fatalf("dims %d: %d float32 distances for %d scanned", dims, exact, scanned)
+		}
+		check("clone", tree.Clone())
+		changed := tree.Clone()
+		changed.QuantizeI8()
+		if err := changed.Upsert(3, v[2500]); err != nil {
+			t.Fatal(err)
+		}
+		check("after upsert", changed)
+	}
+}
+
+func BenchmarkTreeI8(b *testing.B) {
+	for _, dims := range []int{128, 768} {
+		v := treeData(4100, dims)
+		tree := mustBuild(v, 100)
+		tree.QuantizeI8()
+		qs := treeData(64, dims)
+		b.Run(fmt.Sprintf("f32/%d", dims), func(b *testing.B) {
+			i := 0
+			for b.Loop() {
+				tree.EvaluationsBeam(qs[i%64], 16, 128)
+				i++
+			}
+		})
+		b.Run(fmt.Sprintf("i8/%d", dims), func(b *testing.B) {
+			i, e := 0, 0
+			for b.Loop() {
+				_, n := tree.EvaluationsBeamI8(qs[i%64], 16, 128)
+				e += n
+				i++
+			}
+			b.ReportMetric(float64(e)/float64(i), "f32evals/op")
+		})
+	}
+}
