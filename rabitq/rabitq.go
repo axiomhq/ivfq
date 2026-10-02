@@ -651,11 +651,19 @@ type bitScorer struct {
 }
 
 func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
+	s := new(bitScorer)
+	c.bind(s, q, rc)
+	return s
+}
+
+// bind sets s to q against c, reusing s's buffers.
+func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	b := c.Code
 	d := c.Dims
-	s := &bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
+	planes, lut, sums := s.planes, s.lut, s.sums
+	*s = bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
 		freeD: math.Max(float64(d-1), 1), sigmas: boundSigmas, exact: q.Exact,
-		l2: q.Metric == ivfq.L2}
+		l2: q.Metric == ivfq.L2, sums: sums}
 	if q.Sigmas > 0 {
 		s.sigmas = q.Sigmas
 	}
@@ -670,11 +678,11 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	if (!s.l2 && q.Metric != ivfq.Cosine) || len(q.Vector) < d || b.Unit != (q.Metric == ivfq.Cosine) ||
 		q.Rotation == nil || q.Rotation.seed != b.Seed || q.Rotation.dims != d {
 		s.dead, s.exact = true, true
-		return s
+		return
 	}
 	if b.Unit && q.invNorm == 0 {
 		s.dead = true
-		return s
+		return
 	}
 	var residBuf [512]float32 // on the stack: resid does not escape
 	resid := residBuf[:0]
@@ -706,7 +714,7 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	}
 	s.qNorm = math.Sqrt(n)
 	if s.qNorm == 0 {
-		return s // the query IS the centroid: every row's distance is its own norm
+		return // the query IS the centroid: every row's distance is its own norm
 	}
 	// The unit query residual, then 4-bit uniform scalar quantization over
 	// its own range. Rounding is to NEAREST, not the paper's randomized
@@ -727,15 +735,25 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 	}
 	delta := (hi - lo) / queryLevels
 	s.low, s.delta = lo, delta
-	s.planes = make([]uint64, queryBits*s.words)
+	if n := queryBits * s.words; cap(planes) >= n {
+		s.planes = planes[:n]
+		clear(s.planes)
+	} else {
+		s.planes = make([]uint64, n)
+	}
 	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
 	var sumQ, resid2 float64
 	// The scan's tables take each code straight into its single-bit
 	// entry (16g + 1<<i for dimension 4g+i); the sums fill the rest after.
 	if groups := fastGroups(d); groups > 0 {
-		s.lut = make([]byte, 16*groups)
+		if n := 16 * groups; cap(lut) >= n {
+			s.lut = lut[:n]
+			clear(s.lut)
+		} else {
+			s.lut = make([]byte, n)
+		}
 	}
-	lut := s.lut
+	lut = s.lut
 	for j := range resid {
 		x := float64(resid[j]) * inv
 		code := 0
@@ -774,7 +792,6 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 		}
 	}
 	s.varQ = s.resid2 / float64(d)
-	return s
 }
 
 // rowIP is <x_b, u~>: the four bit-plane popcounts, plus the row's own

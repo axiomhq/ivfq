@@ -337,6 +337,22 @@ func (s Scorer) With(c *Quantizer) Scorer {
 	return Scorer{bit: &bit}
 }
 
+// BindRotated is s = c.ScorerRotated(q, rc), reusing s's buffers: a
+// worker that binds one hood after another allocates nothing once warm.
+// Scorers copied from s (With) share its buffers and are invalidated.
+func (s *Scorer) BindRotated(c *Quantizer, q Query, rc []float32) {
+	if q.rotated == nil || len(rc) != c.Dims {
+		rc = nil
+	}
+	if s.bit == nil {
+		s.bit = new(bitScorer)
+	}
+	c.bind(s.bit, q, rc)
+}
+
+// Use is s = s.With(c) in place, without the copy.
+func (s *Scorer) Use(c *Quantizer) { s.bit.b = c.Code }
+
 // SameFrame reports whether o's rows were encoded exactly as c's.
 func (c *Quantizer) SameFrame(o *Quantizer) bool { return c.Code.sameFrame(o.Code) }
 

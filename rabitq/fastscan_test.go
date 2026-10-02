@@ -128,3 +128,64 @@ func BenchmarkScoreAll(b *testing.B) {
 		}
 	})
 }
+
+// A scorer rebound with BindRotated scores as a fresh ScorerRotated, bit
+// for bit, column after column: across widths, after a bind that could
+// not score (wrong metric), and after Use moved it to another column.
+func TestBindRotatedReusesNothingStale(t *testing.T) {
+	var s Scorer
+	for i, dims := range []int{128, 100, 7, 128} {
+		rot := NewRotation(uint64(20+i), dims)
+		v := corpus(70, dims)
+		c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: rot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.PackFastScan()
+		cent := make([]float32, dims)
+		for j := range cent {
+			cent[j] = c.Code.centroid(j)
+		}
+		rc := RotateCentroid(cent, rot)
+		for qi, q := range [][]float32{v[1], cent, v[2]} {
+			if qi == 1 {
+				// A cosine query against l2 codes cannot score: a dead
+				// bind between two live ones. The others rebind a live one.
+				s.BindRotated(&c, NewQuery(q, ivfq.Cosine, rot).Rotated(rot), rc)
+			}
+			pq := NewQuery(q, ivfq.L2, rot).Rotated(rot)
+			s.BindRotated(&c, pq, rc)
+			fresh := c.ScorerRotated(pq, rc)
+			name := fmt.Sprintf("dims %d query %d", dims, qi)
+			want, wantB := make([]float32, 70), make([]float32, 70)
+			fresh.ScoreAll(want, wantB)
+			got, gotB := make([]float32, 70), make([]float32, 70)
+			s.ScoreAll(got, gotB)
+			for r := range want {
+				if math.Float32bits(got[r]) != math.Float32bits(want[r]) || math.Float32bits(gotB[r]) != math.Float32bits(wantB[r]) {
+					t.Fatalf("%s row %d: rebound %v/%v, fresh %v/%v", name, r, got[r], gotB[r], want[r], wantB[r])
+				}
+			}
+			checkScoreAll(t, name, s, 70)
+		}
+	}
+	// Use moves the binding to a column of the same frame.
+	rot := NewRotation(5, 64)
+	v := corpus(40, 64)
+	c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: rot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := c.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := UnmarshalBinaryBorrowed(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.PackFastScan()
+	s.BindRotated(&c, NewQuery(v[2], ivfq.L2, rot), nil)
+	s.Use(&other)
+	checkScoreAll(t, "use", s, 40)
+}
