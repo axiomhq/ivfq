@@ -350,6 +350,18 @@ func (c *Quantizer) SameFrame(o *Quantizer) bool { return c.Code.sameFrame(o.Cod
 // which is how a caller buys the certainty back.
 func (s Scorer) ScoreAndBound(row int) (score, bound float32) { return s.bit.scoreAndBound(row) }
 
+// ScoreAll sets scores[i] to Score(i) for every row of the column, and
+// bounds[i] to ScoreAndBound's bound when bounds is not nil, bit for bit:
+// through the batched scan when the column is packed (PackFastScan), a
+// row at a time otherwise. Both have at least Rows() entries.
+func (s Scorer) ScoreAll(scores, bounds []float32) {
+	scores = scores[:s.bit.b.Rows()]
+	if bounds != nil {
+		bounds = bounds[:len(scores)]
+	}
+	s.bit.scoreAll(scores, bounds)
+}
+
 // Score is ScoreAndBound's estimate alone, bit for bit, without the
 // bound's arithmetic: a probe reads bounds only for its nearest hoods.
 func (s Scorer) Score(row int) float32 { return s.bit.score(row) }

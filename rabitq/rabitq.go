@@ -7,6 +7,7 @@ import (
 	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
+	"math/bits"
 )
 
 // The 1-bit candidate codec: RaBitQ (Gao & Long, SIGMOD 2024,
@@ -116,6 +117,71 @@ type Code struct {
 	// cOff is the centroid's bytes in borrowed: 4*dims for DQB1, 0 for
 	// DQR1, whose centroid is the Centroid slice the caller handed in.
 	cOff int
+	// fast is the rows packed for the batched scan (PackFastScan); nil
+	// until a caller packs the column.
+	fast *fastLayout
+}
+
+// fastLayout is a column's bits as simd.FastScan reads them: blocks of 32
+// rows, one nibble (four dimensions) per row per group, and each row's
+// popcount, which the scan's tables do not carry.
+type fastLayout struct {
+	groups, blocks int
+	nibs           []byte
+	ones           []uint16
+	// norms and aligns are the column's, decoded once: a borrowed column
+	// reads them out of its bytes per row.
+	norms, aligns []float32
+}
+
+// fastGroups is the scan's group count at dims: a nibble per four
+// dimensions, even, or 0 when the column is too wide to scan batched.
+func fastGroups(dims int) int {
+	g := (dims + 3) / 4
+	g += g % 2
+	if g > simd.FastScanMaxGroups {
+		return 0
+	}
+	return g
+}
+
+// PackFastScan lays the column's rows out for Scorer.ScoreAll's batched
+// scan, which then scores 32 rows per table lookup instead of a row at a
+// time: about 1 ns a row against 28 for the popcount product alone, at
+// 128 dimensions. It costs as much memory again as the bits. It writes
+// the column, so call it before the column is shared; packing twice is a
+// no-op, and a column too wide for the scan stays unpacked.
+func (c *Quantizer) PackFastScan() {
+	b := c.Code
+	groups := fastGroups(b.width())
+	if b.fast != nil || groups == 0 {
+		return
+	}
+	rows, words := b.Rows(), bitWords(b.width())
+	f := &fastLayout{groups: groups, blocks: (rows + 31) / 32, ones: make([]uint16, rows),
+		norms: make([]float32, rows), aligns: make([]float32, rows)}
+	f.nibs = make([]byte, f.blocks*groups*16)
+	for r := range rows {
+		k, i, shift := r/32, r%32, uint(0)
+		if i >= 16 {
+			i, shift = i-16, 4
+		}
+		ones := 0
+		for w := range words {
+			x := b.word(r*words + w)
+			ones += bits.OnesCount64(x)
+			for n := range 16 {
+				g := w*16 + n
+				if g >= groups {
+					break
+				}
+				f.nibs[(k*groups+g)*16+i] |= byte(x>>(4*n)&0xF) << shift
+			}
+		}
+		f.ones[r] = uint16(ones)
+		f.norms[r], f.aligns[r] = b.norm(r), b.align(r)
+	}
+	b.fast = f
 }
 
 func bitWords(dims int) int { return (dims + 63) / 64 }
@@ -563,6 +629,11 @@ type bitScorer struct {
 	dims   int
 	words  int
 	planes []uint64
+	// lut is simd.FastScan's tables for this query: entry 16g+n is
+	// Σ code_j over the set bits of nibble n of group g. sums is the
+	// scan's output, reused across the columns this scorer is rebound to.
+	lut  []byte
+	sums []uint16
 
 	qNorm  float64 // ||q - c||
 	delta  float64 // query quantization step
@@ -671,6 +742,21 @@ func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
 		p3[w] |= (c >> 3 & 1) << sh
 	}
 	s.sumQ, s.resid2 = sumQ, resid2
+	if groups := fastGroups(d); groups > 0 {
+		s.lut = make([]byte, 16*groups)
+		for g := range groups {
+			var c [4]byte
+			for i := range 4 {
+				if j := 4*g + i; j < d {
+					c[i] = byte(p0[j/64]>>(j%64)&1 | (p1[j/64]>>(j%64)&1)<<1 | (p2[j/64]>>(j%64)&1)<<2 | (p3[j/64]>>(j%64)&1)<<3)
+				}
+			}
+			t := s.lut[16*g : 16*g+16]
+			for n := 1; n < 16; n++ {
+				t[n] = t[n&(n-1)] + c[bits.TrailingZeros(uint(n))]
+			}
+		}
+	}
 	s.varQ = s.resid2 / float64(d)
 	return s
 }
@@ -688,13 +774,30 @@ func (s *bitScorer) rowIP(row int) float64 {
 	} else {
 		ones, weighted = simd.BitProductWords(b.Words[off:off+s.words], s.planes)
 	}
+	return s.ipOf(ones, weighted)
+}
+
+// ipOf is rowIP from a row's popcount and its weighted popcount
+// Σ_j b_j code_j, however they were counted.
+func (s *bitScorer) ipOf(ones, weighted uint64) float64 {
 	// sum_j (2b_j - 1) u~_j / sqrt(D), with u~_j = v_l + delta*code_j.
 	dot := 2*(s.delta*float64(weighted)+s.low*float64(ones)) - (s.delta*s.sumQ + float64(s.dims)*s.low)
 	return dot * s.scale
 }
 
 // scoreAndBound is the estimator and its error bound for one row.
-func (s *bitScorer) scoreAndBound(row int) (float32, float32) {
+func (s *bitScorer) scoreAndBound(row int) (float32, float32) { return s.estimate(row, false, 0, true) }
+
+// score is scoreAndBound's estimate alone, without the bound's arithmetic.
+func (s *bitScorer) score(row int) float32 {
+	score, _ := s.estimate(row, false, 0, false)
+	return score
+}
+
+// estimate is scoreAndBound, with the row's rowIP already counted when
+// known (the batched scan) and the bound skipped unless bound: the one
+// arithmetic every path scores through, so they agree bit for bit.
+func (s *bitScorer) estimate(row int, known bool, rip float64, bound bool) (float32, float32) {
 	if s.dead {
 		if s.exact {
 			return 0, float32(math.Inf(1))
@@ -708,8 +811,15 @@ func (s *bitScorer) scoreAndBound(row int) (float32, float32) {
 	norm := float64(s.b.norm(row))
 	dist2, slack := norm*norm+s.qNorm*s.qNorm, 0.0
 	if norm > 0 && s.qNorm > 0 && align > 0 {
-		ip := s.rowIP(row) / align
+		if !known {
+			rip = s.rowIP(row)
+		}
+		ip := rip / align
 		dist2 -= 2 * norm * s.qNorm * ip
+		if !bound {
+			gap := norm - s.qNorm
+			return float32(scoreOf(s.l2, max(dist2, gap*gap))), 0
+		}
 		// The paper's error term, sqrt(1-align^2)/align/sqrt(D-1), plus
 		// this query's own rounding residual, added in quadrature because
 		// the two projections are onto independent directions of the same
@@ -734,6 +844,9 @@ func (s *bitScorer) scoreAndBound(row int) (float32, float32) {
 	// on a common sphere are at most 2r apart.
 	gap := norm - s.qNorm
 	dist2 = max(dist2, gap*gap)
+	if !bound {
+		return float32(scoreOf(s.l2, dist2)), 0
+	}
 	if s.exact {
 		return float32(scoreOf(s.l2, dist2)), float32(math.Inf(1))
 	}
@@ -741,24 +854,70 @@ func (s *bitScorer) scoreAndBound(row int) (float32, float32) {
 	return float32(scoreOf(s.l2, dist2)), nextUp(float32(scoreOf(s.l2, lower)))
 }
 
-// score is scoreAndBound's estimate: the same arithmetic, minus the bound.
-func (s *bitScorer) score(row int) float32 {
-	if s.dead {
-		return 0
+// scoreAll is score (bounds nil) or scoreAndBound for every row, through
+// the batched scan when the column is packed and the query has tables.
+func (s *bitScorer) scoreAll(scores, bounds []float32) {
+	rows := s.b.Rows()
+	f := s.b.fast
+	if f == nil || s.dead || len(s.lut) != 16*f.groups {
+		for r := range rows {
+			if bounds != nil {
+				scores[r], bounds[r] = s.scoreAndBound(r)
+			} else {
+				scores[r] = s.score(r)
+			}
+		}
+		return
 	}
-	align := float64(s.b.align(row))
-	if align == zeroRowAlign {
-		return 0
+	if cap(s.sums) < 32*f.blocks {
+		s.sums = make([]uint16, 32*f.blocks)
 	}
-	norm := float64(s.b.norm(row))
-	dist2 := norm*norm + s.qNorm*s.qNorm
-	if norm > 0 && s.qNorm > 0 && align > 0 {
-		ip := s.rowIP(row) / align
-		dist2 -= 2 * norm * s.qNorm * ip
+	sums := s.sums[:32*f.blocks]
+	simd.FastScan(f.nibs, s.lut, f.groups, f.blocks, sums)
+	if bounds == nil {
+		s.scoreFast(f, sums, scores)
+		return
 	}
-	gap := norm - s.qNorm
-	dist2 = max(dist2, gap*gap)
-	return float32(scoreOf(s.l2, dist2))
+	for r := range rows {
+		ip := s.ipOf(uint64(f.ones[r]), uint64(sums[r]))
+		if bounds != nil {
+			scores[r], bounds[r] = s.estimate(r, true, ip, true)
+		} else {
+			scores[r], _ = s.estimate(r, true, ip, false)
+		}
+	}
+}
+
+// scoreFast is estimate(r, true, ipOf(ones, sums[r]), false) for every
+// row, inlined: the same operations in the same order, so the same bits
+// (TestScoreAllMatchesRowByRow), without a call and two decodes per row.
+func (s *bitScorer) scoreFast(f *fastLayout, sums []uint16, scores []float32) {
+	qn, lo, delta, scale := s.qNorm, s.low, s.delta, s.scale
+	q2 := qn * qn
+	tail := s.delta*s.sumQ + float64(s.dims)*s.low
+	norms, aligns, ones := f.norms[:len(scores)], f.aligns[:len(scores)], f.ones[:len(scores)]
+	sums = sums[:len(scores)]
+	for r := range scores {
+		align := float64(aligns[r])
+		if align == zeroRowAlign {
+			scores[r] = 0
+			continue
+		}
+		norm := float64(norms[r])
+		dist2 := norm*norm + q2
+		if norm > 0 && qn > 0 && align > 0 {
+			dot := 2*(delta*float64(sums[r])+lo*float64(ones[r])) - tail
+			ip := dot * scale / align
+			dist2 -= 2 * norm * qn * ip
+		}
+		gap := norm - qn
+		dist2 = max(dist2, gap*gap)
+		if s.l2 {
+			scores[r] = float32(-dist2)
+		} else {
+			scores[r] = float32(min(1, max(-1, 1-dist2/2)))
+		}
+	}
 }
 
 // scoreOf maps a squared distance to the metric's higher-is-better score.
@@ -790,8 +949,12 @@ func nextUp(x float32) float32 {
 
 // retained is what a decoded 1-bit payload holds in memory.
 func (b *Code) retained() int {
-	if b.borrowed != nil {
-		return 0 // the probe entry already charges the raw column
+	n := 0
+	if f := b.fast; f != nil {
+		n = len(f.nibs) + 10*len(f.ones) + 96
 	}
-	return 8*len(b.Words) + 4*(len(b.Centroid)+len(b.Norms)+len(b.Aligns)) + 32
+	if b.borrowed != nil {
+		return n // the probe entry already charges the raw column
+	}
+	return n + 8*len(b.Words) + 4*(len(b.Centroid)+len(b.Norms)+len(b.Aligns)) + 32
 }
