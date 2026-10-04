@@ -7,7 +7,6 @@ import (
 	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
-	"math/bits"
 )
 
 // The 1-bit candidate codec: RaBitQ (Gao & Long, SIGMOD 2024,
@@ -170,35 +169,21 @@ func (c *Quantizer) PackFastScanFrame(rc []float32) {
 		c.PackFastScan()
 		return
 	}
-	rows, words := b.Rows(), bitWords(d)
 	var sum float64
 	for _, v := range rc {
 		sum += float64(v)
 	}
-	scale := 1 / math.Sqrt(float64(d))
-	xbc := make([]float32, rows)
-	for r := range rows {
-		// <x_b, rc> = (2 Σ_{b_j=1} rc_j - Σ rc_j) / sqrt(D)
-		var on float64
-		for w := range words {
-			x := b.word(r*words + w)
-			for x != 0 {
-				j := w*64 + bits.TrailingZeros64(x)
-				on += float64(rc[j])
-				x &= x - 1
-			}
-		}
-		xbc[r] = float32((2*on - sum) * scale)
-	}
+	fr := newFrameSums(rc, bitWords(d), b.Rows(), sum, 1/math.Sqrt(float64(d)))
 	var rcc float64
 	for _, v := range rc {
 		rcc += float64(v) * float64(v)
 	}
-	c.PackFastScan()
 	if b.fast == nil {
-		return
+		b.pack(fr)
+	} else {
+		b.frameOf(fr)
 	}
-	b.fast.xbc, b.fast.rc, b.fast.rcc = xbc, rc, rcc
+	b.fast.xbc, b.fast.rc, b.fast.rcc = fr.xbc, rc, rcc
 }
 
 // PackFastScan lays the column's rows out for Scorer.ScoreAll's batched
@@ -211,50 +196,8 @@ func (c *Quantizer) PackFastScanFrame(rc []float32) {
 // 1 GiB cache that tripled a warm query (753 loads a query against 37).
 // Every method still works on a packed column. It writes the column, so
 // call it before the column is shared; packing twice is a no-op, and a
-// column too wide for the scan stays unpacked.
-func (c *Quantizer) PackFastScan() {
-	b := c.Code
-	groups := fastGroups(b.width())
-	if b.fast != nil || groups == 0 {
-		return
-	}
-	rows, words := b.Rows(), bitWords(b.width())
-	f := &fastLayout{groups: groups, blocks: (rows + 31) / 32, ones: make([]uint16, rows),
-		norms: make([]float32, rows), aligns: make([]float32, rows)}
-	f.nibs = make([]byte, f.blocks*groups*16)
-	for r := range rows {
-		k, i, shift := r/32, r%32, uint(0)
-		if i >= 16 {
-			i, shift = i-16, 4
-		}
-		ones := 0
-		for w := range words {
-			x := b.word(r*words + w)
-			ones += bits.OnesCount64(x)
-			for n := range 16 {
-				g := w*16 + n
-				if g >= groups {
-					break
-				}
-				f.nibs[(k*groups+g)*16+i] |= byte(x>>(4*n)&0xF) << shift
-			}
-		}
-		f.ones[r] = uint16(ones)
-		f.norms[r], f.aligns[r] = b.norm(r), b.align(r)
-	}
-	if b.borrowed != nil && b.cOff > 0 {
-		// The centroid lives in the borrowed bytes: keep a copy. A
-		// centroid the caller handed in (cOff 0) is already b.Centroid.
-		c := make([]float32, b.dims)
-		for i := range c {
-			c[i] = b.centroid(i)
-		}
-		b.Centroid, f.ownCentroid = c, true
-	}
-	b.Norms, b.Aligns = f.norms, f.aligns
-	b.Words, b.borrowed, b.cOff = nil, nil, 0
-	b.fast = f
-}
+// column too wide for the scan stays unpacked (pack.go).
+func (c *Quantizer) PackFastScan() { c.Code.pack(nil) }
 
 func bitWords(dims int) int { return (dims + 63) / 64 }
 
