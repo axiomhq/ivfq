@@ -22,12 +22,9 @@ const (
 	// and the unit a cache evicts), and the centroid set both the query and
 	// the build must scan is N/HoodTarget.
 	//
-	// 1024 was CHOSEN, not swept: it makes the 1M index 977 hoods against the
-	// 1,000 the old rule gave, so the 1M measurements are a controlled A/B on
-	// one corpus rather than a comparison of two different indexes. A sweep
-	// over {512, 2048, 4096} at 1M is the obvious follow-up and has not been
-	// run. The reasoning: fixed-size neighborhoods.
-	HoodTarget = 1024
+	// Experimental Cohere run: at most 256 live rows per published dense
+	// hood. Dotwerk's capacity pass enforces this beyond geometric splits.
+	HoodTarget = 256
 
 	// CandidateBudget is how many candidates a default query is allowed to
 	// score. 100,000 is what the sqrt-sized index spent at 1M for recall
@@ -67,12 +64,9 @@ const (
 	// gets exactly the k it got before this rule existed.
 	hoodFloor = 16
 
-	// splitSizeNum/splitSizeDen is the size trigger: split a hood above 1.4x
-	// the target. A hood that grows until it splits at T leaves two of T/2,
-	// so under steady ingest sizes spread over [T/2, T] with density 1/x and
-	// mean T/(2 ln 2): the trigger that makes the MEAN the target is
-	// 2 ln 2 = 1.386x. At 2x a 10M ingest ended at 1.44x the target, 6,866
-	// clusters where HoodK asks for 9,766.
+	// Geometric maintenance keeps its existing 1.4x trigger. The engine's
+	// independent capacity pass enforces MaxHoodRows before publication,
+	// including imbalanced and duplicate-only parts below this trigger.
 	splitSizeNum = 7
 	splitSizeDen = 5
 	mergeSizeDiv = 4 // merge a hood below target / mergeSizeDiv
@@ -194,6 +188,10 @@ type ClusterStat struct {
 // a test can substitute a stub that names a split unconditionally.
 // SplitTarget answers with one hood, chosen by size and then by radius.
 type DefaultPolicy struct{}
+
+// MaxHoodRows opts this experimental policy into a hard publication cap.
+// Engines without capacity enforcement may still temporarily exceed it.
+func (DefaultPolicy) MaxHoodRows() int { return HoodTarget }
 
 func (DefaultPolicy) Bootstrap(total int) (int, bool) {
 	if total < bootstrapMin {
