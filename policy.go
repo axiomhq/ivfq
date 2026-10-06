@@ -22,9 +22,15 @@ const (
 	// and the unit a cache evicts), and the centroid set both the query and
 	// the build must scan is N/HoodTarget.
 	//
-	// Experimental Cohere run: at most 256 live rows per published dense
-	// hood. Dotwerk's capacity pass enforces this beyond geometric splits.
-	HoodTarget = 256
+	// The sizing rule aims at 196 rows, a soft target with headroom under
+	// MaxHoodRows: a hood born at the hard cap splits again at its first
+	// growth, and that churn was half the rows a backlog ingested.
+	HoodTarget = 196
+
+	// MaxHoodRows is the hard ceiling on live rows in a published dense
+	// hood (DefaultPolicy.MaxHoodRows); dotwerk's capacity pass enforces it
+	// beyond the geometric splits.
+	MaxHoodRows = 256
 
 	// CandidateBudget is how many candidates a default query is allowed to
 	// score. 100,000 is what the sqrt-sized index spent at 1M for recall
@@ -189,9 +195,9 @@ type ClusterStat struct {
 // SplitTarget answers with one hood, chosen by size and then by radius.
 type DefaultPolicy struct{}
 
-// MaxHoodRows opts this experimental policy into a hard publication cap.
+// MaxHoodRows opts this policy into a hard publication cap (MaxHoodRows).
 // Engines without capacity enforcement may still temporarily exceed it.
-func (DefaultPolicy) MaxHoodRows() int { return HoodTarget }
+func (DefaultPolicy) MaxHoodRows() int { return MaxHoodRows }
 
 func (DefaultPolicy) Bootstrap(total int) (int, bool) {
 	if total < bootstrapMin {

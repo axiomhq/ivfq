@@ -122,12 +122,12 @@ func TestDefaultNprobeCurve(t *testing.T) {
 	for _, tc := range []struct{ total, k, want int }{
 		{64, 8, 8},                   // small-N floor stays exact
 		{256, 16, 16},                // exact
-		{20_000, 79, 19},             // ceil(N/256), quarter ceiling
-		{100_000, 391, 97},           // quarter ceiling
-		{400_000, 1563, 390},         // quarter ceiling
-		{1_000_000, 3907, 391},       // ceil(100000/256) candidate budget
-		{10_000_000, 39063, 1220},    // recall floor, k/32
-		{100_000_000, 390625, 12207}, // recall floor
+		{20_000, 103, 25},            // ceil(N/196), quarter ceiling
+		{100_000, 511, 127},          // quarter ceiling
+		{400_000, 2041, 510},         // quarter ceiling
+		{1_000_000, 5103, 511},       // ceil(100000/196) candidate budget
+		{10_000_000, 51021, 1594},    // recall floor, k/32
+		{100_000_000, 510205, 15943}, // recall floor
 	} {
 		if got := HoodK(tc.total); got != tc.k {
 			t.Fatalf("HoodK(%d) = %d, want %d", tc.total, got, tc.k)
@@ -165,10 +165,10 @@ func TestHoodKIsFixedSize(t *testing.T) {
 	}
 	// Above it, k = ceil(total/HoodTarget) and hood size is flat.
 	for _, tc := range []struct{ total, k int }{
-		{100_000, 391},
-		{1_000_000, 3907},
-		{10_000_000, 39063},
-		{100_000_000, 390625},
+		{100_000, 511},
+		{1_000_000, 5103},
+		{10_000_000, 51021},
+		{100_000_000, 510205},
 	} {
 		if got := HoodK(tc.total); got != tc.k {
 			t.Errorf("HoodK(%d) = %d, want %d", tc.total, got, tc.k)
