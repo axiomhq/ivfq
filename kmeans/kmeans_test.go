@@ -518,3 +518,196 @@ func BenchmarkCentroidScan(b *testing.B) {
 }
 
 var sink int
+
+// A 98/2 split of two far blobs: Fit isolates the sliver, FitBalanced must
+// leave each child at least a quarter and the centroids at their members' means.
+func TestFitBalancedFloor(t *testing.T) {
+	r := rand.New(rand.NewSource(3))
+	const n, d = 400, 8
+	vecs := make([][]float32, n)
+	for i := range vecs {
+		vecs[i] = make([]float32, d)
+		for j := range vecs[i] {
+			vecs[i][j] = float32(r.NormFloat64())
+			if i < 8 {
+				vecs[i][j] += 30
+			}
+		}
+	}
+	cfg := Config{K: 2, Iters: SplitIters, Seed: 1}
+	_, plain, _ := cfg.Fit(context.Background(), vecs)
+	cents, assign, err := cfg.FitBalanced(context.Background(), vecs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := func(a []int) (c [2]int) {
+		for _, x := range a {
+			c[x]++
+		}
+		return
+	}
+	if c := count(plain); min(c[0], c[1]) > 8 {
+		t.Fatalf("setup: plain Fit gave %v, want a sliver", c)
+	}
+	c := count(assign)
+	if min(c[0], c[1]) < n/4 {
+		t.Fatalf("sides %v, want both >= %d", c, n/4)
+	}
+	for k := range cents {
+		for j := 0; j < d; j++ {
+			var sum float64
+			for i, v := range vecs {
+				if assign[i] == k {
+					sum += float64(v[j])
+				}
+			}
+			if got, want := float64(cents[k][j]), sum/float64(c[k]); math.Abs(got-want) > 1e-4 {
+				t.Fatalf("centroid %d dim %d = %v, want mean %v", k, j, got, want)
+			}
+		}
+	}
+}
+
+// The behavioural half of weaviate's FitBalanced tests, run on ours: the size
+// floor, centroids that are the members' means, a natural split left alone,
+// ties broken by input order, tiny n, Iters 0, and K != 2 refused.
+
+func constVecs(n, d int, v float32) [][]float32 {
+	out := make([][]float32, n)
+	for i := range out {
+		out[i] = make([]float32, d)
+		for j := range out[i] {
+			out[i][j] = v
+		}
+	}
+	return out
+}
+
+func gaussVecs(n, d int, seed int64) [][]float32 {
+	r := rand.New(rand.NewSource(seed))
+	out := make([][]float32, n)
+	for i := range out {
+		out[i] = make([]float32, d)
+		for j := range out[i] {
+			out[i][j] = float32(r.NormFloat64())
+		}
+	}
+	return out
+}
+
+func sides(a []int) (c [2]int) {
+	for _, x := range a {
+		c[x]++
+	}
+	return
+}
+
+func checkMeans(t *testing.T, vecs, cents [][]float32, assign []int) {
+	t.Helper()
+	c := sides(assign)
+	for k := range cents {
+		if c[k] == 0 {
+			continue
+		}
+		for j := range cents[k] {
+			var sum float64
+			for i, v := range vecs {
+				if assign[i] == k {
+					sum += float64(v[j])
+				}
+			}
+			if got, want := float64(cents[k][j]), sum/float64(c[k]); math.Abs(got-want) > 1e-3 {
+				t.Fatalf("centroid %d dim %d = %v, want the members' mean %v", k, j, got, want)
+			}
+		}
+	}
+}
+
+func TestFitBalancedWeaviateCases(t *testing.T) {
+	const d = 4
+	ctx := context.Background()
+	cfg := Config{K: 2, Iters: SplitIters, Seed: 1}
+
+	blob := append(gaussVecs(198, d, 7), constVecs(2, d, 1000)...)
+	minority := append(constVecs(194, d, 0.1), constVecs(6, d, 0.9)...)
+	for name, vecs := range map[string][][]float32{
+		"normal":     gaussVecs(300, d, 7),
+		"minority":   minority,
+		"duplicates": constVecs(200, d, 0.5),
+		"outliers":   blob,
+	} {
+		cents, assign, err := cfg.FitBalanced(ctx, vecs)
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		n := len(vecs)
+		floor := (n + 3) / 4
+		c := sides(assign)
+		if len(assign) != n || min(c[0], c[1]) < floor {
+			t.Fatalf("%s: sides %v, want both >= %d", name, c, floor)
+		}
+		if name == "outliers" && min(c[0], c[1]) != floor {
+			t.Fatalf("outliers: smaller side %d, want exactly the floor %d", min(c[0], c[1]), floor)
+		}
+		checkMeans(t, vecs, cents, assign)
+	}
+
+	// A natural 140/60 split meets the floor and must come back untouched.
+	vecs := append(constVecs(140, d, 0), constVecs(60, d, 10)...)
+	_, assign, err := cfg.FitBalanced(ctx, vecs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := sides(assign); min(c[0], c[1]) != 60 {
+		t.Fatalf("natural split: sides %v, want 140/60", c)
+	}
+	for i := range vecs {
+		if want := assign[0]; i < 140 && assign[i] != want {
+			t.Fatalf("group A split at %d", i)
+		} else if i >= 140 && assign[i] != assign[140] {
+			t.Fatalf("group B split at %d", i)
+		}
+	}
+	if assign[0] == assign[140] {
+		t.Fatal("groups not separated")
+	}
+
+	// All identical: every distance ties, so the floor side is the input-order prefix.
+	_, assign, err = cfg.FitBalanced(ctx, constVecs(200, d, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, a := range assign {
+		if (i < 50) != (a == assign[0]) {
+			t.Fatalf("identical: vector %d on side %d, want the first 50 on side %d", i, a, assign[0])
+		}
+	}
+
+	for _, n := range []int{2, 3, 5, 7, 9} {
+		_, assign, err := cfg.FitBalanced(ctx, constVecs(n, d, 1))
+		if err != nil {
+			t.Fatal(n, err)
+		}
+		if c := sides(assign); min(c[0], c[1]) < (n+3)/4 {
+			t.Fatalf("n=%d: sides %v", n, c)
+		}
+	}
+
+	for _, iters := range []int{0, 1} {
+		v := gaussVecs(100, d, 7)
+		cents, assign, err := Config{K: 2, Iters: iters, Seed: 1}.FitBalanced(ctx, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := sides(assign); min(c[0], c[1]) < 25 {
+			t.Fatalf("iters=%d: sides %v", iters, c)
+		}
+		checkMeans(t, v, cents, assign)
+	}
+
+	for _, k := range []int{1, 3, 4} {
+		if _, _, err := (Config{K: k, Iters: 3}).FitBalanced(ctx, gaussVecs(20, d, 7)); err == nil {
+			t.Fatalf("K=%d: want an error", k)
+		}
+	}
+}

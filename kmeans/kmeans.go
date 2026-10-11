@@ -1,7 +1,9 @@
 package kmeans
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"math/rand"
@@ -534,4 +536,84 @@ func farthest(vecs [][]float32, centroids [][]float32, assign []int, claimed map
 		return 0 // unreachable given the reseed bound; defensive
 	}
 	return best
+}
+
+// FitBalanced is Fit for K = 2 with a size floor: each child holds at least
+// ceil(n/4) of the vectors, so a split always shrinks the parent to at most
+// 3n/4 and a skewed cluster cannot shed a sliver again and again. It seeds and
+// runs Lloyd's as Fit does over every vector (a split is one cluster's size),
+// and returns that when it already meets the floor. Otherwise, for up to Iters rounds, it assigns by distance difference, moving the
+// vectors that lose least across the boundary when a side is under the floor,
+// and re-means. The centroids are the means of the returned assignment, which
+// is therefore not always nearest-centroid.
+func (c Config) FitBalanced(ctx context.Context, vecs [][]float32) ([][]float32, []int, error) {
+	n := len(vecs)
+	if c.K != 2 || n < 2 {
+		return nil, nil, errors.New("kmeans: FitBalanced needs K = 2 and at least 2 vectors")
+	}
+	cents, assign, err := run(ctx, vecs, 2, c.Iters, c.Seed, c.Spherical)
+	if err != nil {
+		return nil, nil, err
+	}
+	floor := (n + 3) / 4
+	var sides [2]int
+	for _, a := range assign {
+		sides[a]++
+	}
+	remean := func() {
+		var cnt [2]float32
+		for k := range cents {
+			clear(cents[k])
+		}
+		for i, v := range vecs {
+			cnt[assign[i]]++
+			for j, x := range v {
+				cents[assign[i]][j] += x
+			}
+		}
+		for k := range cents {
+			for j := range cents[k] {
+				cents[k][j] /= cnt[k]
+			}
+			if c.Spherical {
+				simd.Normalize(cents[k])
+			}
+		}
+	}
+	if min(sides[0], sides[1]) >= floor {
+		remean() // Fit's assignment already meets the floor; only the means move
+		return cents, assign, nil
+	}
+	delta := make([]float64, n)
+	order := make([]int, n)
+	for it := 0; it < max(1, c.Iters); it++ {
+		left := 0
+		for i, v := range vecs {
+			delta[i] = float64(simd.L2Sq(v, cents[0]) - simd.L2Sq(v, cents[1]))
+			order[i] = i
+			if delta[i] < 0 {
+				left++
+			}
+		}
+		left = min(max(left, floor), n-floor)
+		slices.SortStableFunc(order, func(a, b int) int { return cmp.Compare(delta[a], delta[b]) })
+		changed := false
+		for rank, i := range order {
+			side := 1
+			if rank < left {
+				side = 0
+			}
+			if assign[i] != side {
+				assign[i], changed = side, true
+			}
+		}
+		remean()
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if !changed {
+			break
+		}
+	}
+	return cents, assign, nil
 }
