@@ -289,11 +289,11 @@ func (q Query) Global(rot *Rotation) Query {
 		code := 0
 		if g.delta > 0 {
 			y := (f - lo) / g.delta
-			t := math.Trunc(y)
-			if y-t >= 0.5 {
-				t++
+			code = int(y) // y >= 0, so this truncates
+			if y-float64(code) >= 0.5 {
+				code++
 			}
-			code = min(255, max(0, int(t)))
+			code = min(255, code)
 		}
 		g.sumQ += float64(code)
 		e := lo + g.delta*float64(code) - f
