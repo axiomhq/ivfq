@@ -101,21 +101,69 @@ func quantizeI8(v []float32, dst []int8) (scale, err, norm8 float32) {
 // and its float32 distance is computed, as EvaluationsBeam computes it,
 // only for the probe nearest by int8 and for any other leaf whose lower
 // bound is within the probe-th float32 distance so far. The count is the
-// float32 distances computed, internal nodes included. A tree without its
+// float32 distances computed, internal nodes included; the int8 distances
+// are not counted (EvaluationsBeamI8Work reports both). A tree without its
 // int8 copies (not quantized, or changed since) is searched by
 // EvaluationsBeam.
 func (t Tree) EvaluationsBeamI8(q []float32, beam, probe int) ([]int, int) {
+	ids, work := t.EvaluationsBeamI8Work(q, beam, probe)
+	return ids, work.Float32
+}
+
+// TreeWork is a tree search's centroid work: Float32 is the float32
+// distances it computed, internal nodes included, and Quantized the int8
+// leaf distances it computed beside them. Every centroid a search scores is
+// in one of the two.
+type TreeWork struct {
+	Float32, Quantized int
+}
+
+// Total is every centroid distance computed, float32 and int8.
+func (w TreeWork) Total() int { return w.Float32 + w.Quantized }
+
+// EvaluationsBeamI8Work is EvaluationsBeamI8, the same leaves, with the
+// int8 distances counted beside the float32 ones.
+func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWork) {
 	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
-		return nil, 0
+		return nil, TreeWork{}
 	}
 	w := workspaces.Get().(*treeWorkspace)
 	defer workspaces.Put(w)
 	evals := t.beamHolders(w, q, beam)
-	for _, id := range w.holders {
+	if !t.holdersQuantized(w.holders) {
+		ids, e := t.nearestBeam(q, beam, probe)
+		return ids, TreeWork{Float32: e}
+	}
+	out, work := t.rankHoldersI8(w, q, probe, nil)
+	work.Float32 += evals
+	if out == nil {
+		return nil, work
+	}
+	ids := make([]int, len(out))
+	for i, x := range out {
+		ids[i] = x.id
+	}
+	return ids, work
+}
+
+// holdersQuantized reports whether every holder in holders has its int8
+// copy.
+func (t Tree) holdersQuantized(holders []int) bool {
+	for _, id := range holders {
 		if t.nodes[id].i8 == nil {
-			return t.nearestBeam(q, beam, probe)
+			return false
 		}
 	}
+	return true
+}
+
+// rankHoldersI8 ranks the leaves of w.holders, all of them or (keep non-nil)
+// only those keep admits, through the holders' int8 copies: the count
+// nearest, nearest first, exactly as a float32 ranking of the same leaves
+// orders them. Every holder in w.holders must be quantized. The result is
+// w.out8, nil when no leaf was scanned.
+func (t Tree) rankHoldersI8(w *treeWorkspace, q []float32, count int, keep []bool) ([]rankedNode, TreeWork) {
+	var work TreeWork
 	qq := Dot(q, q)
 	if cap(w.q8) < t.dims {
 		w.q8 = make([]int8, t.dims)
@@ -127,14 +175,29 @@ func (t Tree) EvaluationsBeamI8(q []float32, beam, probe int) ([]int, int) {
 	w.next, w.slack, w.lnorm = w.next[:0], w.slack[:0], w.lnorm[:0]
 	for _, id := range w.holders {
 		n := &t.nodes[id]
+		whole := keep == nil || allKept(n.leaves, keep)
 		if cap(w.dots8) < len(n.leaves) {
 			w.dots8 = make([]int32, len(n.leaves))
 		}
 		dots := w.dots8[:len(n.leaves)]
-		simd.DotsI8(q8, n.i8.codes, dots)
+		if whole {
+			simd.DotsI8(q8, n.i8.codes, dots)
+			work.Quantized += len(n.leaves)
+		} else {
+			// A partly eligible holder scores only its eligible rows.
+			for j, leaf := range n.leaves {
+				if keep[leaf] {
+					simd.DotsI8(q8, n.i8.codes[j*t.dims:(j+1)*t.dims], dots[j:j+1])
+					work.Quantized++
+				}
+			}
+		}
 		qm := float64(Dot(q, n.i8.mean))
 		qmd := math.Sqrt(max(0, float64(qq)+n.i8.mean2-2*qm)) // ||q - mean||
 		for j, leaf := range n.leaves {
+			if !whole && !keep[leaf] {
+				continue
+			}
 			// <q,c> = <q,mean> + <q~,r~> + <mean, r-r~> + <q-q~, r~> + <q-mean, r-r~>;
 			// the last two are the error, bounded by Cauchy-Schwarz.
 			dot := qm + float64(qs)*float64(n.i8.scale[j])*float64(dots[j]) + float64(n.i8.offset[j])
@@ -149,9 +212,9 @@ func (t Tree) EvaluationsBeamI8(q []float32, beam, probe int) ([]int, int) {
 			w.lnorm = append(w.lnorm, n.norms[j])
 		}
 	}
-	count := min(probe, len(w.next))
+	count = min(count, len(w.next))
 	if count == 0 {
-		return nil, evals
+		return nil, work
 	}
 	// T: the count-th int8 distance. Every leaf at or under it is measured
 	// first, which sets the cut; then any other leaf that its bound cannot
@@ -160,7 +223,7 @@ func (t Tree) EvaluationsBeamI8(q []float32, beam, probe int) ([]int, int) {
 	threshold := w.best[len(w.best)-1].d
 	out := w.out8[:0]
 	measure := func(i int) {
-		evals++
+		work.Float32++
 		c := w.next[i]
 		d := float64(qq) + float64(w.lnorm[i]) - 2*float64(Dot(q, t.leaves[c.id]))
 		out = insertNearest(out, rankedNode{c.id, float32(d)}, count)
@@ -176,11 +239,17 @@ func (t Tree) EvaluationsBeamI8(q []float32, beam, probe int) ([]int, int) {
 		}
 	}
 	w.out8 = out
-	ids := make([]int, len(out))
-	for i, x := range out {
-		ids[i] = x.id
+	return out, work
+}
+
+// allKept reports whether keep admits every leaf in leaves.
+func allKept(leaves []int, keep []bool) bool {
+	for _, leaf := range leaves {
+		if !keep[leaf] {
+			return false
+		}
 	}
-	return ids, evals
+	return true
 }
 
 // beamHolders is nearestInto's beam over the internal nodes: w.holders is
