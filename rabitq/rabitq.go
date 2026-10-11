@@ -346,6 +346,7 @@ func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 	dims := len(b.Centroid)
 	w := bitWords(dims)
 	block := make([]float32, dims*simd.FillBlock) // block[j*simd.FillBlock+r]: dim j of the block's row r
+	words := make([]uint64, w*simd.FillBlock)     // words[g*simd.FillBlock+r]: sign word g of the block's row r
 	scale := math.Sqrt(float64(dims))
 	var rows [simd.FillBlock]int
 	for start := 0; start < len(work); {
@@ -362,36 +363,21 @@ func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 			n++
 		}
 		var norms, absSums [simd.FillBlock]float64
-		for j := range dims {
-			col := block[j*simd.FillBlock:][:simd.FillBlock]
-			for r := range n {
-				x := float64(col[r])
-				norms[r] += x * x
-			}
-		}
+		simd.BlockSumSq(block, dims, &norms)
 		for r, i := range rows[:n] {
 			norms[r] = math.Sqrt(norms[r])
 			b.Norms[i] = float32(norms[r]) // 0: the row IS the centroid, no bits, alignment 0
 		}
 		rot.applyBlock(block) // rows past n are stale and ignored
-		// Branch-free: a residual's signs are coin flips, so a branch on
-		// each mispredicts half the time. |x| accumulates exactly what
-		// fillRow's +x / -x does.
-		var words [simd.FillBlock]uint64
-		for j := range dims {
-			col := block[j*simd.FillBlock:][:simd.FillBlock]
-			shift := uint(j % 64)
-			for r := range n {
-				x := col[r]
-				words[r] |= b2u(x >= 0) << shift
-				absSums[r] += math.Abs(float64(x))
-			}
-			if shift == 63 || j == dims-1 {
-				for r, i := range rows[:n] {
-					if b.Norms[i] != 0 {
-						b.Words[i*w+j/64] = words[r]
-					}
-					words[r] = 0
+		// Sign bits and |x| sums in vector registers, one row per lane: a
+		// residual's signs are coin flips, so a branch on each would
+		// mispredict half the time. |x| accumulates exactly what fillRow's
+		// +x / -x does.
+		simd.BlockSignAbs(block, dims, &absSums, words)
+		for g := 0; g < w; g++ {
+			for r, i := range rows[:n] {
+				if b.Norms[i] != 0 {
+					b.Words[i*w+g] = words[g*simd.FillBlock+r]
 				}
 			}
 		}
@@ -769,8 +755,8 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		// Rotated: R(q-c) = Rq - Rc, no rotation per column.
 		for j := range resid {
 			resid[j] = q.rotated[j] - rc[j]
-			n += float64(resid[j]) * float64(resid[j])
 		}
+		n = simd.SumSq(resid)
 	} else {
 		copy(resid, q.Vector[:d])
 		if b.Unit {
@@ -781,8 +767,8 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		}
 		for j := range resid {
 			resid[j] -= b.centroid(j)
-			n += float64(resid[j]) * float64(resid[j])
 		}
+		n = simd.SumSq(resid)
 		q.Rotation.Apply(resid)
 	}
 	s.qNorm = math.Sqrt(n)
@@ -801,11 +787,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	// stay in registers, and the planes are set without a branch per bit.
 	// The codes are the same, bit for bit.
 	inv := 1 / s.qNorm
-	lo, hi := math.Inf(1), math.Inf(-1)
-	for j := range resid {
-		x := float64(resid[j]) * inv
-		lo, hi = min(lo, x), max(hi, x)
-	}
+	lo, hi := simd.MinMaxScaled(resid, inv)
 	delta := (hi - lo) / queryLevels
 	s.low, s.delta = lo, delta
 	if n := queryBits * s.words; cap(planes) >= n {
@@ -816,8 +798,8 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	}
 	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
 	var sumQ, resid2 float64
-	// The scan's tables take each code straight into its single-bit
-	// entry (16g + 1<<i for dimension 4g+i); the sums fill the rest after.
+	// The scan's tables hold, for each group of four dimensions, every
+	// subset sum of its codes (subsetSums).
 	if groups := fastGroups(d); groups > 0 {
 		if n := 16 * groups; cap(lut) >= n {
 			s.lut = lut[:n]
@@ -827,43 +809,39 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		}
 	}
 	lut = s.lut
-	for j := range resid {
-		x := float64(resid[j]) * inv
-		code := 0
-		if delta > 0 {
-			// math.Round, exactly, for y >= 0 (x >= lo): Trunc is one
-			// instruction where Round is a bit-twiddling call, and
-			// y - Trunc(y) is exact.
-			y := (x - lo) / delta
-			t := math.Trunc(y)
-			if y-t >= 0.5 {
-				t++
-			}
-			code = int(t)
-			code = min(queryLevels, max(0, code))
+	var codeBuf [512]byte
+	codes := codeBuf[:0]
+	if d <= len(codeBuf) {
+		codes = codeBuf[:d]
+	} else {
+		codes = make([]byte, d)
+	}
+	if delta > 0 {
+		// Nearest-level rounding in vector registers (simd.QuantCodes).
+		resid2 = simd.QuantCodes(codes, resid, inv, lo, delta, queryLevels)
+	} else {
+		for j := range resid {
+			e := lo - float64(resid[j])*inv
+			resid2 += e * e
 		}
-		sumQ += float64(code)
-		e := lo + delta*float64(code) - x
-		resid2 += e * e
+	}
+	var codeSum int
+	for j, code := range codes {
+		codeSum += int(code)
 		w, sh := j/64, uint(j%64)
 		c := uint64(code)
 		p0[w] |= (c & 1) << sh
 		p1[w] |= (c >> 1 & 1) << sh
 		p2[w] |= (c >> 2 & 1) << sh
 		p3[w] |= (c >> 3 & 1) << sh
-		if lut != nil {
-			lut[16*(j/4)+1<<(j%4)] = byte(code)
-		}
+	}
+	sumQ = float64(codeSum)
+	for i := 0; lut != nil && i*4 < d; i++ {
+		var c [4]byte // the last group's missing codes are 0
+		copy(c[:], codes[4*i:min(d, 4*i+4)])
+		subsetSums((*[16]byte)(lut[16*i:]), c[0], c[1], c[2], c[3])
 	}
 	s.sumQ, s.resid2 = sumQ, resid2
-	for g := 0; g < len(lut); g += 16 {
-		t := lut[g : g+16 : g+16]
-		t[3] = t[1] + t[2]
-		t[5], t[6], t[7] = t[4]+t[1], t[4]+t[2], t[4]+t[3]
-		for n := 9; n < 16; n++ {
-			t[n] = t[8] + t[n-8]
-		}
-	}
 	s.varQ = s.resid2 / float64(d)
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/axiomhq/ivfq"
+	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"slices"
 )
@@ -276,41 +277,29 @@ func (q Query) Global(rot *Rotation) Query {
 	if groups == 0 {
 		return q
 	}
-	g := &globalQuery{lutLo: make([]byte, 16*groups), lutHi: make([]byte, 16*groups)}
-	lo, hi := math.Inf(1), math.Inf(-1)
-	for _, v := range x {
-		f := float64(v)
-		lo, hi = min(lo, f), max(hi, f)
-		g.qq += f * f
-	}
+	luts := make([]byte, 32*groups)
+	g := &globalQuery{lutLo: luts[: 16*groups : 16*groups], lutHi: luts[16*groups:]}
+	g.qq = simd.SumSq(x)
+	lo, hi := simd.MinMaxScaled(x, 1)
 	g.low, g.delta = lo, (hi-lo)/255
-	for j, v := range x {
-		f := float64(v)
-		code := 0
-		if g.delta > 0 {
-			y := (f - lo) / g.delta
-			code = int(y) // y >= 0, so this truncates
-			if y-float64(code) >= 0.5 {
-				code++
-			}
-			code = min(255, code)
-		}
-		g.sumQ += float64(code)
-		e := lo + g.delta*float64(code) - f
-		g.resid2 += e * e
-		g.lutLo[16*(j/4)+1<<(j%4)] = byte(code & 15)
-		g.lutHi[16*(j/4)+1<<(j%4)] = byte(code >> 4)
-	}
-	for _, lut := range [][]byte{g.lutLo, g.lutHi} {
-		for o := 0; o < len(lut); o += 16 {
-			t := lut[o : o+16 : o+16]
-			t[3] = t[1] + t[2]
-			t[5], t[6], t[7] = t[4]+t[1], t[4]+t[2], t[4]+t[3]
-			for n := 9; n < 16; n++ {
-				t[n] = t[8] + t[n-8]
-			}
+	codes := make([]byte, d)
+	if g.delta > 0 {
+		g.resid2 = simd.QuantCodes(codes, x, 1, lo, g.delta, 255)
+	} else {
+		for _, v := range x {
+			e := lo - float64(v)
+			g.resid2 += e * e
 		}
 	}
+	var sumQ int
+	for i := 0; i*4 < d; i++ {
+		var c [4]byte // the last group's missing codes are 0
+		copy(c[:], codes[4*i:min(d, 4*i+4)])
+		sumQ += int(c[0]) + int(c[1]) + int(c[2]) + int(c[3])
+		subsetSums((*[16]byte)(g.lutLo[16*i:]), c[0]&15, c[1]&15, c[2]&15, c[3]&15)
+		subsetSums((*[16]byte)(g.lutHi[16*i:]), c[0]>>4, c[1]>>4, c[2]>>4, c[3]>>4)
+	}
+	g.sumQ = float64(sumQ)
 	q.global = g
 	return q
 }
@@ -498,4 +487,13 @@ func finiteNonnegative(x float32) bool {
 type ranked struct {
 	id    int
 	score float32
+}
+
+// subsetSums sets t[m] to the sum of those of c0..c3 whose bit is set in m:
+// the 16-entry table the fast scan looks four dimensions' codes up in.
+func subsetSums(t *[16]byte, c0, c1, c2, c3 byte) {
+	t[0], t[1], t[2], t[3] = 0, c0, c1, c0+c1
+	t[4], t[5], t[6], t[7] = c2, c0+c2, c1+c2, c0+c1+c2
+	t[8], t[9], t[10], t[11] = c3, c0+c3, c1+c3, c0+c1+c3
+	t[12], t[13], t[14], t[15] = c2+c3, c0+c2+c3, c1+c2+c3, c0+c1+c2+c3
 }

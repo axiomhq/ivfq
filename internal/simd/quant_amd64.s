@@ -1,0 +1,209 @@
+#include "textflag.h"
+
+DATA half8<>+0(SB)/8, $0.5
+GLOBL half8<>(SB), RODATA|NOPTR, $8
+DATA one8<>+0(SB)/8, $1.0
+GLOBL one8<>(SB), RODATA|NOPTR, $8
+DATA absmask8<>+0(SB)/8, $0x7fffffffffffffff
+GLOBL absmask8<>(SB), RODATA|NOPTR, $8
+// VPSHUFB mask taking the low byte of each int32 lane to bytes 0..3.
+DATA pack8<>+0(SB)/4, $0x0c080400
+DATA pack8<>+4(SB)/4, $0x80808080
+DATA pack8<>+8(SB)/4, $0x80808080
+DATA pack8<>+12(SB)/4, $0x80808080
+GLOBL pack8<>(SB), RODATA|NOPTR, $16
+
+// func blockSumSq(block *float32, dims int, sums *float64)
+TEXT ·blockSumSq(SB), NOSPLIT, $0-24
+	MOVQ block+0(FP), SI
+	MOVQ dims+8(FP), CX
+	MOVQ sums+16(FP), DI
+	VMOVUPD (DI), Y4
+	VMOVUPD 32(DI), Y5
+	VMOVUPD 64(DI), Y6
+	VMOVUPD 96(DI), Y7
+
+loop:
+	VCVTPS2PD (SI), Y0
+	VCVTPS2PD 16(SI), Y1
+	VCVTPS2PD 32(SI), Y2
+	VCVTPS2PD 48(SI), Y3
+	VMULPD Y0, Y0, Y0
+	VMULPD Y1, Y1, Y1
+	VMULPD Y2, Y2, Y2
+	VMULPD Y3, Y3, Y3
+	VADDPD Y0, Y4, Y4
+	VADDPD Y1, Y5, Y5
+	VADDPD Y2, Y6, Y6
+	VADDPD Y3, Y7, Y7
+	ADDQ $64, SI
+	DECQ CX
+	JNZ  loop
+
+	VMOVUPD Y4, (DI)
+	VMOVUPD Y5, 32(DI)
+	VMOVUPD Y6, 64(DI)
+	VMOVUPD Y7, 96(DI)
+	VZEROUPPER
+	RET
+
+// func blockBits(block *float32, n int, abs *float64, out *uint32)
+TEXT ·blockBits(SB), NOSPLIT, $0-32
+	MOVQ block+0(FP), SI
+	MOVQ n+8(FP), CX
+	MOVQ abs+16(FP), DI
+	MOVQ out+24(FP), R8
+	VMOVUPD (DI), Y4
+	VMOVUPD 32(DI), Y5
+	VMOVUPD 64(DI), Y6
+	VMOVUPD 96(DI), Y7
+	VBROADCASTSD absmask8<>(SB), Y15
+	VPXOR Y14, Y14, Y14 // bits, rows 0-7
+	VPXOR Y13, Y13, Y13 // bits, rows 8-15
+	VXORPS Y12, Y12, Y12 // zero
+	XORQ AX, AX
+
+loop:
+	VCVTPS2PD (SI), Y0
+	VCVTPS2PD 16(SI), Y1
+	VCVTPS2PD 32(SI), Y2
+	VCVTPS2PD 48(SI), Y3
+	VANDPD Y15, Y0, Y0
+	VANDPD Y15, Y1, Y1
+	VANDPD Y15, Y2, Y2
+	VANDPD Y15, Y3, Y3
+	VADDPD Y0, Y4, Y4
+	VADDPD Y1, Y5, Y5
+	VADDPD Y2, Y6, Y6
+	VADDPD Y3, Y7, Y7
+	VMOVUPS (SI), Y8
+	VMOVUPS 32(SI), Y9
+	VCMPPS $0x1d, Y12, Y8, Y8 // >= 0, false for NaN
+	VCMPPS $0x1d, Y12, Y9, Y9
+	VPSRLD $31, Y8, Y8
+	VPSRLD $31, Y9, Y9
+	VMOVQ AX, X10
+	VPSLLD X10, Y8, Y8
+	VPSLLD X10, Y9, Y9
+	VPOR Y8, Y14, Y14
+	VPOR Y9, Y13, Y13
+	ADDQ $64, SI
+	INCQ AX
+	CMPQ AX, CX
+	JLT  loop
+
+	VMOVUPD Y4, (DI)
+	VMOVUPD Y5, 32(DI)
+	VMOVUPD Y6, 64(DI)
+	VMOVUPD Y7, 96(DI)
+	VMOVDQU Y14, (R8)
+	VMOVDQU Y13, 32(R8)
+	VZEROUPPER
+	RET
+
+// func minMaxScaled(x *float32, n int, mul float64) (lo, hi float64)
+TEXT ·minMaxScaled(SB), NOSPLIT, $0-40
+	MOVQ x+0(FP), SI
+	MOVQ n+8(FP), CX
+	VBROADCASTSD mul+16(FP), Y4
+	VCVTPS2PD (SI), Y0
+	VMULPD Y4, Y0, Y0
+	VMOVAPD Y0, Y1
+	ADDQ $16, SI
+	SUBQ $4, CX
+	JZ   reduce
+
+loop:
+	VCVTPS2PD (SI), Y2
+	VMULPD Y4, Y2, Y2
+	VMINPD Y2, Y0, Y0
+	VMAXPD Y2, Y1, Y1
+	ADDQ $16, SI
+	SUBQ $4, CX
+	JNZ  loop
+
+reduce:
+	VEXTRACTF128 $1, Y0, X2
+	VMINPD X2, X0, X0
+	VPERMILPD $1, X0, X2
+	VMINSD X2, X0, X0
+	VEXTRACTF128 $1, Y1, X3
+	VMAXPD X3, X1, X1
+	VPERMILPD $1, X1, X3
+	VMAXSD X3, X1, X1
+	VMOVSD X0, lo+24(FP)
+	VMOVSD X1, hi+32(FP)
+	VZEROUPPER
+	RET
+
+// func sumSq(x *float32, n int) float64
+TEXT ·sumSq(SB), NOSPLIT, $0-24
+	MOVQ x+0(FP), SI
+	MOVQ n+8(FP), CX
+	SHRQ $2, CX
+	VXORPD Y0, Y0, Y0
+
+loop:
+	VCVTPS2PD (SI), Y2
+	VMULPD Y2, Y2, Y2
+	VADDPD Y2, Y0, Y0
+	ADDQ $16, SI
+	DECQ CX
+	JNZ  loop
+
+	VEXTRACTF128 $1, Y0, X1
+	VADDPD X1, X0, X0
+	VPERMILPD $1, X0, X1
+	VADDSD X1, X0, X0
+	VMOVSD X0, ret+16(FP)
+	VZEROUPPER
+	RET
+
+// func quantCodes(codes *byte, x *float32, n int, mul, lo, delta, levels float64) float64
+TEXT ·quantCodes(SB), NOSPLIT, $0-64
+	MOVQ codes+0(FP), DI
+	MOVQ x+8(FP), SI
+	MOVQ n+16(FP), CX
+	SHRQ $2, CX
+	VBROADCASTSD mul+24(FP), Y4
+	VBROADCASTSD lo+32(FP), Y5
+	VBROADCASTSD delta+40(FP), Y6
+	VBROADCASTSD levels+48(FP), Y7
+	VBROADCASTSD half8<>(SB), Y10
+	VBROADCASTSD one8<>(SB), Y11
+	VXORPD Y12, Y12, Y12
+	VXORPD Y0, Y0, Y0
+	VMOVDQU pack8<>(SB), X15
+
+loop:
+	VCVTPS2PD (SI), Y2
+	VMULPD Y4, Y2, Y2     // x
+	VSUBPD Y5, Y2, Y3     // x - lo
+	VDIVPD Y6, Y3, Y3     // y
+	VROUNDPD $3, Y3, Y8   // t = trunc(y)
+	VSUBPD Y8, Y3, Y9     // y - t
+	VCMPPD $0x1d, Y10, Y9, Y9
+	VANDPD Y11, Y9, Y9
+	VADDPD Y9, Y8, Y8     // t++ when y-t >= 0.5
+	VMAXPD Y12, Y8, Y8
+	VMINPD Y7, Y8, Y8
+	VMULPD Y6, Y8, Y13    // delta*t
+	VADDPD Y13, Y5, Y13   // lo + delta*t
+	VSUBPD Y2, Y13, Y13   // - x
+	VMULPD Y13, Y13, Y13
+	VADDPD Y13, Y0, Y0
+	VCVTTPD2DQY Y8, X14
+	VPSHUFB X15, X14, X14
+	VMOVD X14, (DI)
+	ADDQ $16, SI
+	ADDQ $4, DI
+	DECQ CX
+	JNZ  loop
+
+	VEXTRACTF128 $1, Y0, X1
+	VADDPD X1, X0, X0
+	VPERMILPD $1, X0, X1
+	VADDSD X1, X0, X0
+	VMOVSD X0, ret+56(FP)
+	VZEROUPPER
+	RET

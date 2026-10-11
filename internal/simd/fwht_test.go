@@ -120,3 +120,82 @@ func TestPermScaleMatchesGeneric(t *testing.T) {
 		}
 	}
 }
+
+// The quantizer kernels equal their Go references bit for bit (the block
+// kernels also equal a plain per-row loop), across widths and tails.
+func TestQuantKernels(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 8))
+	for _, dims := range []int{1, 3, 4, 5, 31, 32, 33, 63, 64, 65, 100, 128, 768, 1000} {
+		block := make([]float32, dims*FillBlock)
+		for i := range block {
+			block[i] = float32(r.NormFloat64())
+			if i%17 == 0 {
+				block[i] = 0
+			}
+			if i%53 == 0 {
+				block[i] = float32(math.Copysign(0, -1)) // -0 >= 0 is true
+			}
+		}
+		var sums, want [FillBlock]float64
+		BlockSumSq(block, dims, &sums)
+		for j := 0; j < dims; j++ {
+			for k := range want {
+				x := float64(block[j*FillBlock+k])
+				want[k] += x * x
+			}
+		}
+		if sums != want {
+			t.Fatalf("dims=%d BlockSumSq differs", dims)
+		}
+
+		var abs, wabs [FillBlock]float64
+		words := make([]uint64, (dims+63)/64*FillBlock)
+		BlockSignAbs(block, dims, &abs, words)
+		wwords := make([]uint64, len(words))
+		for j := 0; j < dims; j++ {
+			for k := 0; k < FillBlock; k++ {
+				v := block[j*FillBlock+k]
+				if v >= 0 {
+					wwords[(j/64)*FillBlock+k] |= 1 << (j % 64)
+				}
+				wabs[k] += math.Abs(float64(v))
+			}
+		}
+		if abs != wabs || !slices.Equal(words, wwords) {
+			t.Fatalf("dims=%d BlockSignAbs differs", dims)
+		}
+
+		x := block[:dims]
+		for _, mul := range []float64{1, 0.37} {
+			lo, hi := MinMaxScaled(x, mul)
+			wlo, whi := math.Inf(1), math.Inf(-1)
+			for _, v := range x {
+				wlo, whi = min(wlo, float64(v)*mul), max(whi, float64(v)*mul)
+			}
+			if lo != wlo || hi != whi {
+				t.Fatalf("dims=%d MinMaxScaled %v %v, want %v %v", dims, lo, hi, wlo, whi)
+			}
+			delta := (hi - lo) / 15
+			if delta <= 0 {
+				continue // QuantCodes needs delta > 0
+			}
+			codes, wcodes := make([]byte, dims), make([]byte, dims)
+			got := QuantCodes(codes, x, mul, lo, delta, 15)
+			hasFWHTOld := hasFWHT
+			hasFWHT = false
+			wgot := QuantCodes(wcodes, x, mul, lo, delta, 15)
+			hasFWHT = hasFWHTOld
+			if got != wgot || !slices.Equal(codes, wcodes) {
+				t.Fatalf("dims=%d mul=%v QuantCodes vector %v, reference %v", dims, mul, got, wgot)
+			}
+		}
+		sq := SumSq(x)
+		hasFWHTOld := hasFWHT
+		hasFWHT = false
+		wsq := SumSq(x)
+		hasFWHT = hasFWHTOld
+		if sq != wsq {
+			t.Fatalf("dims=%d SumSq %v, reference %v", dims, sq, wsq)
+		}
+	}
+}
