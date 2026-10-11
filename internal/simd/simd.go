@@ -13,10 +13,18 @@ import (
 )
 
 // Dot returns the inner product of a and b.
-func Dot(a, b []float32) float32 { return floats.Float32Dot(a, b) }
+func Dot(a, b []float32) float32 {
+	if hasF32AVX512 && len(a) > 0 && len(b) >= len(a) {
+		return dotAVX512(a, b)
+	}
+	return floats.Float32Dot(a, b)
+}
 
 // L2Sq returns the squared euclidean distance between a and b.
 func L2Sq(a, b []float32) float32 {
+	if hasF32AVX512 && len(a) > 0 && len(b) >= len(a) {
+		return l2sqF32AVX512(&a[0], &b[0], len(a))
+	}
 	d := floats.Float32Distance(a, b)
 	return d * d
 }

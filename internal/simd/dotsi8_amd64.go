@@ -4,10 +4,17 @@ import "golang.org/x/sys/cpu"
 
 var hasDotsI8AVX2 = cpu.X86.HasAVX2
 
+// VNNI needs AVX-512 BW for the byte masks and F for the 512-bit registers.
+var hasDotsI8VNNI = cpu.X86.HasAVX512F && cpu.X86.HasAVX512BW && cpu.X86.HasAVX512VNNI
+
 func dotsI8(q, block []int8, out []int32) {
 	dims := len(q)
 	if !hasDotsI8AVX2 || len(out) == 0 {
 		dotsI8Generic(q, block, out)
+		return
+	}
+	if hasDotsI8VNNI {
+		dotsI8VNNI(&q[0], &block[0], dims, len(out), &out[0])
 		return
 	}
 	wide := dims &^ 15
@@ -33,3 +40,8 @@ func dotsI8(q, block []int8, out []int32) {
 //
 //go:noescape
 func dotsI8AVX2(q *int8, block *int8, dims, wide, rows int, out *int32)
+
+// dotsI8VNNI is dotsI8AVX2 for all dims (no tail), 64 lanes a step.
+//
+//go:noescape
+func dotsI8VNNI(q *int8, block *int8, dims, rows int, out *int32)

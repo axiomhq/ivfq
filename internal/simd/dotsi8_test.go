@@ -9,8 +9,21 @@ import (
 // DotsI8 is the integer dot product, exactly, at every width's tail and at
 // the extremes of int8 (-128 · -128 in every lane).
 func TestDotsI8MatchesGeneric(t *testing.T) {
+	// Every kernel the CPU has: the AVX-512 VNNI one, then AVX2 alone.
+	for _, vnni := range []bool{true, false} {
+		if vnni && !hasDotsI8VNNI {
+			continue
+		}
+		old := hasDotsI8VNNI
+		hasDotsI8VNNI = vnni
+		testDotsI8(t)
+		hasDotsI8VNNI = old
+	}
+}
+
+func testDotsI8(t *testing.T) {
 	r := rand.New(rand.NewPCG(5, 6))
-	for _, dims := range []int{1, 15, 16, 17, 31, 32, 100, 128, 768, 769} {
+	for _, dims := range []int{1, 15, 16, 17, 31, 32, 63, 64, 65, 100, 127, 128, 129, 191, 192, 193, 768, 769} {
 		for _, rows := range []int{0, 1, 3, 7} {
 			q := make([]int8, dims)
 			block := make([]int8, dims*rows)
@@ -20,7 +33,7 @@ func TestDotsI8MatchesGeneric(t *testing.T) {
 			for i := range block {
 				block[i] = int8(r.IntN(256) - 128)
 			}
-			if dims == 768 {
+			if dims == 768 || dims == 193 {
 				for i := range q {
 					q[i] = -128
 				}

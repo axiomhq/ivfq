@@ -1,0 +1,128 @@
+#include "textflag.h"
+
+// func dotF32I8AVX512(x *float32, b *byte, n int) float32
+// sum x[i]*float32(int8(b[i])): sign-extend, convert and FMA in one pass,
+// 64 lanes a step on four chains, the last partial step masked.
+TEXT ·dotF32I8AVX512(SB), NOSPLIT, $0-28
+	MOVQ x+0(FP), SI
+	MOVQ b+8(FP), DI
+	MOVQ n+16(FP), CX
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+
+big:
+	CMPQ CX, $64
+	JLT  small
+	VPMOVSXBD (DI), Z4
+	VPMOVSXBD 16(DI), Z5
+	VPMOVSXBD 32(DI), Z6
+	VPMOVSXBD 48(DI), Z7
+	VCVTDQ2PS Z4, Z4
+	VCVTDQ2PS Z5, Z5
+	VCVTDQ2PS Z6, Z6
+	VCVTDQ2PS Z7, Z7
+	VFMADD231PS (SI), Z4, Z0
+	VFMADD231PS 64(SI), Z5, Z1
+	VFMADD231PS 128(SI), Z6, Z2
+	VFMADD231PS 192(SI), Z7, Z3
+	ADDQ $256, SI
+	ADDQ $64, DI
+	SUBQ $64, CX
+	JMP  big
+
+small:
+	CMPQ CX, $16
+	JLT  rest
+	VPMOVSXBD (DI), Z4
+	VCVTDQ2PS Z4, Z4
+	VFMADD231PS (SI), Z4, Z0
+	ADDQ $64, SI
+	ADDQ $16, DI
+	SUBQ $16, CX
+	JMP  small
+
+rest:
+	TESTQ CX, CX
+	JZ    reduce
+	MOVQ $1, AX
+	SHLQ CX, AX
+	DECQ AX
+	KMOVW AX, K1
+	VPMOVSXBD.Z (DI), K1, Z4
+	VCVTDQ2PS Z4, Z4
+	VMOVUPS.Z (SI), K1, Z5
+	VFMADD231PS Z5, Z4, Z0
+
+reduce:
+	VADDPS Z1, Z0, Z0
+	VADDPS Z3, Z2, Z2
+	VADDPS Z2, Z0, Z0
+	VEXTRACTF64X4 $1, Z0, Y1
+	VADDPS Y1, Y0, Y0
+	VEXTRACTF128 $1, Y0, X1
+	VADDPS X1, X0, X0
+	VPSHUFD $0x4e, X0, X1
+	VADDPS X1, X0, X0
+	VPSHUFD $0xb1, X0, X1
+	VADDPS X1, X0, X0
+	VMOVSS X0, ret+24(FP)
+	VZEROUPPER
+	RET
+
+// func dotF32I8AVX2(x *float32, b *byte, n int) float32
+// The same for n a multiple of 8, 32 lanes a step on four chains.
+TEXT ·dotF32I8AVX2(SB), NOSPLIT, $0-28
+	MOVQ x+0(FP), SI
+	MOVQ b+8(FP), DI
+	MOVQ n+16(FP), CX
+	VPXOR Y0, Y0, Y0
+	VPXOR Y1, Y1, Y1
+	VPXOR Y2, Y2, Y2
+	VPXOR Y3, Y3, Y3
+
+big:
+	CMPQ CX, $32
+	JLT  small
+	VPMOVSXBD (DI), Y4
+	VPMOVSXBD 8(DI), Y5
+	VPMOVSXBD 16(DI), Y6
+	VPMOVSXBD 24(DI), Y7
+	VCVTDQ2PS Y4, Y4
+	VCVTDQ2PS Y5, Y5
+	VCVTDQ2PS Y6, Y6
+	VCVTDQ2PS Y7, Y7
+	VFMADD231PS (SI), Y4, Y0
+	VFMADD231PS 32(SI), Y5, Y1
+	VFMADD231PS 64(SI), Y6, Y2
+	VFMADD231PS 96(SI), Y7, Y3
+	ADDQ $128, SI
+	ADDQ $32, DI
+	SUBQ $32, CX
+	JMP  big
+
+small:
+	TESTQ CX, CX
+	JZ    reduce
+	VPMOVSXBD (DI), Y4
+	VCVTDQ2PS Y4, Y4
+	VFMADD231PS (SI), Y4, Y0
+	ADDQ $32, SI
+	ADDQ $8, DI
+	SUBQ $8, CX
+	JMP  small
+
+reduce:
+	VADDPS Y1, Y0, Y0
+	VADDPS Y3, Y2, Y2
+	VADDPS Y2, Y0, Y0
+	VEXTRACTF128 $1, Y0, X1
+	VADDPS X1, X0, X0
+	VPSHUFD $0x4e, X0, X1
+	VADDPS X1, X0, X0
+	VPSHUFD $0xb1, X0, X1
+	VADDPS X1, X0, X0
+	VMOVSS X0, ret+24(FP)
+	VZEROUPPER
+	RET

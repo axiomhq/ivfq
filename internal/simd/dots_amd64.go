@@ -17,6 +17,10 @@ func Dots(q, block, out []float32) {
 		dotsGeneric(q, block, out)
 		return
 	}
+	if hasF32AVX512 && len(out) > 0 {
+		dotsF32AVX512(&q[0], &block[0], dims, len(out), &out[0])
+		return
+	}
 	if hasAVX2FMA && len(out) > 0 {
 		dotsAVX2FMA(&q[0], &block[0], dims, len(out), &out[0])
 		return
