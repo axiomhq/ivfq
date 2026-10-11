@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# Go toolchain pinned by go.mod
+want="$(awk '/^go /{print $2; exit}' go.mod)"
+goroot="$HOME/.local/go"
+if [ ! -x "$goroot/bin/go" ] || [ "$("$goroot/bin/go" env GOVERSION 2>/dev/null)" != "go$want" ]; then
+  echo "Installing Go $want"
+  tmp="$(mktemp -d)"
+  curl -fsSL "https://go.dev/dl/go${want}.linux-amd64.tar.gz" -o "$tmp/go.tgz"
+  rm -rf "$goroot"
+  mkdir -p "$(dirname "$goroot")"
+  tar -C "$tmp" -xzf "$tmp/go.tgz"
+  mv "$tmp/go" "$goroot"
+  rm -rf "$tmp"
+fi
+
+marker="# ivfq Go toolchain"
+if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<PROFILE
+
+$marker
+export PATH="$goroot/bin:\$HOME/go/bin:\$PATH"
+PROFILE
+fi
+
+export PATH="$goroot/bin:$PATH" GOTOOLCHAIN=local
+echo "Downloading modules"
+go mod download
+go build ./...
