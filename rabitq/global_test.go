@@ -45,7 +45,7 @@ func offCentre(n, d int, seed int64) [][]float32 {
 // both metrics, a zero row, a query that is a row, the zero query, exact.
 func TestGlobalScoreAllMatchesRowByRow(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
-		for _, dims := range []int{7, 100, 128, 130} {
+		for _, dims := range []int{1, 7, 100, 128, 130, 768} {
 			for _, rows := range []int{1, 33, 100} {
 				v := corpus(rows, dims)
 				if rows > 5 {
@@ -53,14 +53,18 @@ func TestGlobalScoreAllMatchesRowByRow(t *testing.T) {
 				}
 				c, rot := globalColumn(t, v, metric)
 				for qi, q := range [][]float32{corpus(1, dims)[0], v[0], make([]float32, dims)} {
-					for _, exact := range []bool{false, true} {
+					for _, opts := range []struct {
+						sigmas float64
+						exact  bool
+					}{{}, {exact: true}, {sigmas: 1}, {sigmas: 3.2}} {
 						pq := NewQuery(q, metric, rot).Global(rot)
-						pq.Exact = exact
+						pq.Exact, pq.Sigmas = opts.exact, opts.sigmas
 						var s Scorer
 						if !s.BindGlobal(&c, pq) {
 							t.Fatalf("%v d%d: a packed column and a global query did not bind", metric, dims)
 						}
-						checkScoreAll(t, fmt.Sprintf("global %v/d%d/r%d/q%d/exact=%v", metric, dims, rows, qi, exact), s, rows)
+						name := fmt.Sprintf("global %v/d%d/r%d/q%d/exact=%v/sigmas=%g", metric, dims, rows, qi, opts.exact, opts.sigmas)
+						checkScoreAll(t, name, s, rows)
 					}
 				}
 			}
@@ -183,6 +187,14 @@ func BenchmarkHoodBindAndScore(b *testing.B) {
 			for b.Loop() {
 				s.BindGlobal(&c, gq)
 				s.ScoreAll(scores, nil)
+			}
+		})
+		b.Run(fmt.Sprintf("global+bounds/%d", dims), func(b *testing.B) {
+			gq := NewQuery(q, ivfq.L2, rot).Global(rot)
+			bounds := make([]float32, len(scores))
+			for b.Loop() {
+				s.BindGlobal(&c, gq)
+				s.ScoreAll(scores, bounds)
 			}
 		})
 	}

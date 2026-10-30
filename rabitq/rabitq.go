@@ -1030,11 +1030,7 @@ func (s *bitScorer) scoreAllGlobal(f *fastLayout, scores, bounds []float32) {
 		s.scoreFastGlobal(f, lo, hi, scores)
 		return
 	}
-	for r := range scores {
-		w := uint64(lo[r]) + 16*uint64(hi[r])
-		rip := (s.ipOf(uint64(f.ones[r]), w) - float64(f.xbc[r])) * s.inv
-		scores[r], bounds[r] = s.estimate(r, true, rip, true)
-	}
+	s.scoreBoundsGlobal(f, lo, hi, scores, bounds)
 }
 
 // scoreFastGlobal is scoreFast for a global query: estimate(r, true, rip,
@@ -1068,6 +1064,55 @@ func (s *bitScorer) scoreFastGlobal(f *fastLayout, lo, hi []uint16, scores []flo
 		} else {
 			scores[r] = float32(min(1, max(-1, 1-dist2/2)))
 		}
+	}
+}
+
+// scoreBoundsGlobal keeps estimate's arithmetic and rounding, but reads the
+// packed arrays directly and hoists column constants out of the row loop.
+// Keep the score-only loop separate: carrying bounds there slows that hot path.
+func (s *bitScorer) scoreBoundsGlobal(f *fastLayout, lo, hi []uint16, scores, bounds []float32) {
+	qn, low, delta, scale, inv := s.qNorm, s.low, s.delta, s.scale, s.inv
+	q2 := qn * qn
+	tail := s.delta*s.sumQ + float64(s.dims)*s.low
+	norms, aligns, ones, xbc := f.norms[:len(scores)], f.aligns[:len(scores)], f.ones[:len(scores)], f.xbc[:len(scores)]
+	lo, hi = lo[:len(scores)], hi[:len(scores)]
+	bounds = bounds[:len(scores)]
+	for r := range scores {
+		align := float64(aligns[r])
+		if align == zeroRowAlign {
+			scores[r], bounds[r] = 0, 0
+			continue
+		}
+		norm := float64(norms[r])
+		dist2, slack := norm*norm+q2, 0.0
+		if norm > 0 && qn > 0 && align > 0 {
+			w := float64(uint64(lo[r]) + 16*uint64(hi[r]))
+			dot := 2*(delta*w+low*float64(ones[r])) - tail
+			rip := (dot*scale - float64(xbc[r])) * inv
+			ip := rip / align
+			dist2 -= 2 * norm * qn * ip
+			if !s.exact {
+				sigma := math.Sqrt((1-align*align)/s.freeD+s.varQ) / align
+				if near := math.Abs(ip) - s.sigmas*sigma; near > 0 {
+					// near > 0 excludes NaN, so this clamp needs no NaN handling.
+					perp2 := 1 - near*near
+					if perp2 < 0 {
+						perp2 = 0
+					}
+					sigma = math.Sqrt((1-align*align)*perp2/s.freeD+s.varQ) / align
+				}
+				slack = 2 * norm * qn * s.sigmas * sigma
+			}
+		}
+		gap := norm - qn
+		dist2 = max(dist2, gap*gap)
+		scores[r] = float32(scoreOf(s.l2, dist2))
+		if s.exact {
+			bounds[r] = float32(math.Inf(1))
+			continue
+		}
+		lower := max(dist2-slack, gap*gap)
+		bounds[r] = nextUp(float32(scoreOf(s.l2, lower)))
 	}
 }
 
@@ -1120,14 +1165,14 @@ func scoreOf(l2 bool, dist2 float64) float64 {
 // differ only on max(+Inf, NaN), and no bound term is +Inf beside a NaN).
 func nextUp(x float32) float32 {
 	switch {
+	case x < 0: // the common case for L2 bounds
+		return math.Float32frombits(math.Float32bits(x) - 1)
 	case x != x || x == float32(math.Inf(1)):
 		return x
 	case x == 0:
 		return math.Float32frombits(1)
-	case x > 0:
-		return math.Float32frombits(math.Float32bits(x) + 1)
 	}
-	return math.Float32frombits(math.Float32bits(x) - 1)
+	return math.Float32frombits(math.Float32bits(x) + 1)
 }
 
 // retained is what a decoded 1-bit payload holds in memory.
