@@ -136,7 +136,7 @@ func BenchmarkScoreAll(b *testing.B) {
 // not score (wrong metric), and after Use moved it to another column.
 func TestBindRotatedReusesNothingStale(t *testing.T) {
 	var s Scorer
-	for i, dims := range []int{128, 100, 7, 128} {
+	for i, dims := range []int{128, 100, 7, 128, 512, 513, 768, 1536, 513, 65} {
 		rot := NewRotation(uint64(20+i), dims)
 		v := corpus(70, dims)
 		c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: rot})
@@ -159,6 +159,9 @@ func TestBindRotatedReusesNothingStale(t *testing.T) {
 			s.BindRotated(&c, pq, rc)
 			fresh := c.ScorerRotated(pq, rc)
 			name := fmt.Sprintf("dims %d query %d", dims, qi)
+			if allocs := testing.AllocsPerRun(10, func() { s.BindRotated(&c, pq, rc) }); allocs != 0 {
+				t.Fatalf("%s: warmed BindRotated allocated %g times, want 0", name, allocs)
+			}
 			want, wantB := make([]float32, 70), make([]float32, 70)
 			fresh.ScoreAll(want, wantB)
 			got, gotB := make([]float32, 70), make([]float32, 70)

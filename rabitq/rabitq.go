@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
+
 	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
-	"math"
 )
 
 // The 1-bit candidate codec: RaBitQ (Gao & Long, SIGMOD 2024,
@@ -677,6 +678,8 @@ type bitScorer struct {
 	sigmas float64
 	exact  bool
 	l2     bool
+	resid  []float32
+	codes  []byte
 }
 
 func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
@@ -694,7 +697,8 @@ func (c *Quantizer) bindGlobal(s *bitScorer, q Query) {
 	planes, lut, sums := s.planes, s.lut, s.sums
 	*s = bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
 		freeD: math.Max(float64(d-1), 1), sigmas: boundSigmas, exact: q.Exact,
-		l2: q.Metric == ivfq.L2, planes: planes[:0], lut: lut[:0], sums: sums}
+		l2: q.Metric == ivfq.L2, planes: planes[:0], lut: lut[:0], sums: sums,
+		resid: s.resid, codes: s.codes}
 	if q.Sigmas > 0 {
 		s.sigmas = q.Sigmas
 	}
@@ -722,7 +726,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	planes, lut, sums := s.planes, s.lut, s.sums
 	*s = bitScorer{b: b, dims: d, words: bitWords(d), scale: 1 / math.Sqrt(float64(d)),
 		freeD: math.Max(float64(d-1), 1), sigmas: boundSigmas, exact: q.Exact,
-		l2: q.Metric == ivfq.L2, sums: sums}
+		l2: q.Metric == ivfq.L2, sums: sums, resid: s.resid, codes: s.codes}
 	if q.Sigmas > 0 {
 		s.sigmas = q.Sigmas
 	}
@@ -744,11 +748,14 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		return
 	}
 	var residBuf [512]float32 // on the stack: resid does not escape
-	resid := residBuf[:0]
+	var resid []float32
 	if d <= len(residBuf) {
 		resid = residBuf[:d]
 	} else {
-		resid = make([]float32, d)
+		if cap(s.resid) < d {
+			s.resid = make([]float32, d)
+		}
+		resid = s.resid[:d]
 	}
 	var n float64
 	if rc != nil && q.rotated != nil {
@@ -810,16 +817,20 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	}
 	lut = s.lut
 	var codeBuf [512]byte
-	codes := codeBuf[:0]
+	var codes []byte
 	if d <= len(codeBuf) {
 		codes = codeBuf[:d]
 	} else {
-		codes = make([]byte, d)
+		if cap(s.codes) < d {
+			s.codes = make([]byte, d)
+		}
+		codes = s.codes[:d]
 	}
 	if delta > 0 {
 		// Nearest-level rounding in vector registers (simd.QuantCodes).
 		resid2 = simd.QuantCodes(codes, resid, inv, lo, delta, queryLevels)
 	} else {
+		clear(codes)
 		for j := range resid {
 			e := lo - float64(resid[j])*inv
 			resid2 += e * e
