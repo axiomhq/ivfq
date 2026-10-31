@@ -1,11 +1,11 @@
 package ivfq
 
 import (
-	"bufio"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/axiomhq/ivfq/bench"
 	"github.com/axiomhq/ivfq/kmeans"
 	"io"
 	"io/fs"
@@ -941,68 +941,6 @@ var (
 	beamFixtureByKF = map[beamKey]*beamFixture{}
 )
 
-// beamStream reads u8bin rows in batches, converting each row to float32 the
-
-// way cmd/bench's reader does.
-
-type beamStream struct {
-	f    *os.File
-	r    *bufio.Reader
-	dims int
-	row  int
-	rows int
-	buf  []byte
-}
-
-func openBeamStream(b *testing.B, path string) *beamStream {
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			b.Skipf("corpus %s unavailable (set %s to point elsewhere)", path, beamCorpusEnv)
-		}
-		b.Fatal(err)
-	}
-	var h [2]uint32
-	if err := binary.Read(f, binary.LittleEndian, &h); err != nil {
-		f.Close()
-		b.Fatal(err)
-	}
-	if h[0] == 0 || h[1] == 0 {
-		f.Close()
-		b.Fatalf("%s: empty corpus", path)
-	}
-	return &beamStream{
-		f:    f,
-		r:    bufio.NewReaderSize(f, 8<<20),
-		dims: int(h[1]),
-		rows: int(h[0]),
-		buf:  make([]byte, h[1]),
-	}
-}
-
-func (s *beamStream) close() { s.f.Close() }
-
-// next returns up to n rows as float32 vectors, io.EOF once the file ends.
-
-func (s *beamStream) next(n int) ([][]float32, error) {
-	out := make([][]float32, 0, n)
-	for len(out) < n && s.row < s.rows {
-		if _, err := io.ReadFull(s.r, s.buf); err != nil {
-			return out, fmt.Errorf("%s: row %d: %w", s.f.Name(), s.row, err)
-		}
-		v := make([]float32, s.dims)
-		for i, x := range s.buf {
-			v[i] = float32(x)
-		}
-		out = append(out, v)
-		s.row++
-	}
-	if len(out) == 0 {
-		return nil, io.EOF
-	}
-	return out, nil
-}
-
 // loadBeamFixture trains k centroids over the corpus and prepares the
 
 // held-out measurement rows, then builds the tree at the given fanout.
@@ -1059,13 +997,19 @@ func loadBeamTrain(b *testing.B, k int, sample bool) *beamTrain {
 	if path == "" {
 		path = beamCorpus
 	}
-	s := openBeamStream(b, path)
-	defer s.close()
+	s, err := bench.OpenBin(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			b.Skipf("corpus %s unavailable (set %s to point elsewhere)", path, beamCorpusEnv)
+		}
+		b.Fatal(err)
+	}
+	defer s.Close()
 
 	const poolRows = 1_000_000
 	const queryRows = 100_000
-	if s.rows < poolRows+queryRows {
-		b.Fatalf("%s: %d rows, need %d", path, s.rows, poolRows+queryRows)
+	if s.Rows() < poolRows+queryRows {
+		b.Fatalf("%s: %d rows, need %d", path, s.Rows(), poolRows+queryRows)
 	}
 	// In-sample marks the training rows; everything else streams to the
 	// query set in input order, so the draw is a pure function of the seed.
@@ -1080,15 +1024,15 @@ func loadBeamTrain(b *testing.B, k int, sample bool) *beamTrain {
 	}
 	train := make([][]float32, 0, trainN)
 	queries := make([][]float32, 0, queryRows)
+	base := 0
 	for len(train) < trainN || len(queries) < queryRows {
-		rows, err := s.next(4096)
+		rows, err := s.Next(4096)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			b.Fatal(err)
 		}
-		base := s.row - len(rows)
 		for bi, v := range rows {
 			idx := base + bi
 			// Sample mode holds out every unsampled pool row for
@@ -1108,12 +1052,13 @@ func loadBeamTrain(b *testing.B, k int, sample bool) *beamTrain {
 			}
 			train = append(train, v)
 		}
+		base += len(rows)
 	}
 	if len(train) < trainN || len(queries) < queryRows {
 		b.Fatalf("%s: streamed only %d training and %d query rows, need %d and %d", path, len(train), len(queries), trainN, queryRows)
 	}
 
-	b.Logf("k=%d: training %d rows, measuring %d held-out rows, dims %d", k, len(train), len(queries), s.dims)
+	b.Logf("k=%d: training %d rows, measuring %d held-out rows, dims %d", k, len(train), len(queries), s.Dims())
 	centroids, _, err := (kmeans.Config{K: k, Iters: beamIters, Seed: beamSeed}).Fit(context.Background(), train)
 	if err != nil {
 		b.Fatal(err)

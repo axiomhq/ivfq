@@ -216,9 +216,7 @@ func parallel(n int, f func(int) error) error {
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	for range min(runtime.GOMAXPROCS(0), n) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= n {
@@ -226,7 +224,7 @@ func parallel(n int, f func(int) error) error {
 				}
 				errs[i] = f(i)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	for _, err := range errs {

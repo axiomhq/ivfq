@@ -129,7 +129,7 @@ func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWo
 	}
 	w := workspaces.Get().(*treeWorkspace)
 	defer workspaces.Put(w)
-	evals := t.beamHolders(w, q, beam)
+	evals := t.beamHolders(w, q, Dot(q, q), beam)
 	if !t.holdersQuantized(w.holders) {
 		ids, e := t.nearestBeam(q, beam, probe)
 		return ids, TreeWork{Float32: e}
@@ -254,11 +254,10 @@ func allKept(leaves []int, keep []bool) bool {
 
 // beamHolders is nearestInto's beam over the internal nodes: w.holders is
 // the leaf holders it reaches, and it returns the distances computed.
-func (t Tree) beamHolders(w *treeWorkspace, q []float32, beam int) int {
+func (t Tree) beamHolders(w *treeWorkspace, q []float32, qq float32, beam int) int {
 	w.active = append(w.active[:0], t.root)
 	w.holders = w.holders[:0]
 	evals := 0
-	qq := Dot(q, q)
 	for len(w.active) > 0 {
 		w.best = w.best[:0]
 		for _, id := range w.active {

@@ -250,7 +250,7 @@ func TestEvaluationsBeamI8Work(t *testing.T) {
 		}
 		// Every leaf the float32 search scanned was scored in int8.
 		w := workspaces.Get().(*treeWorkspace)
-		internal := tree.beamHolders(w, q, 16)
+		internal := tree.beamHolders(w, q, Dot(q, q), 16)
 		workspaces.Put(w)
 		if work.Quantized != all-internal {
 			t.Fatalf("quantized %d, want %d leaves", work.Quantized, all-internal)

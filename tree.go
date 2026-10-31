@@ -319,10 +319,8 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 	if t.root < 0 || beam <= 0 || count <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
-	w.active = append(w.active[:0], t.root)
-	w.holders = w.holders[:0]
-	evals := 0
 	qq := Dot(q, q)
+	evals := t.beamHolders(w, q, qq, beam)
 	// Squared distances use the norm identity, sharing q's norm across
 	// each block. The terms combine in float64 so near ties retain their
 	// low bits on long vectors.
@@ -333,29 +331,6 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 			w.next = append(w.next, rankedNode{id, float32(d)})
 		}
 		evals += len(ids)
-	}
-	for len(w.active) > 0 {
-		w.best = w.best[:0]
-		for _, id := range w.active {
-			n := &t.nodes[id]
-			if len(n.children) == 0 {
-				w.holders = append(w.holders, id)
-				continue
-			}
-			dots := w.dotsOf(q, n.block, len(n.children))
-			for j, child := range n.children {
-				d := float64(qq) + float64(n.norms[j]) - 2*float64(dots[j])
-				w.best = insertNearest(w.best, rankedNode{child, float32(d)}, beam)
-			}
-			evals += len(n.children)
-		}
-		if len(w.best) == 0 {
-			break
-		}
-		w.active = w.active[:0]
-		for _, x := range w.best {
-			w.active = append(w.active, x.id)
-		}
 	}
 	if count == 1 {
 		var best rankedNode
@@ -571,19 +546,14 @@ func (t Tree) MarshalBinary() ([]byte, error) {
 	for _, x := range []uint32{uint32(t.dims), uint32(t.fanout), uint32(t.root + 1), uint32(t.height), uint32(len(t.leaves)), uint32(len(t.nodes))} {
 		binary.Write(&b, binary.LittleEndian, x)
 	}
-	writeVec := func(v []float32) {
-		for _, x := range v {
-			binary.Write(&b, binary.LittleEndian, math.Float32bits(x))
-		}
-	}
 	for _, v := range t.leaves {
 		if len(v) != t.dims {
 			return nil, errors.New("ivf: mixed dimensions")
 		}
-		writeVec(v)
+		binary.Write(&b, binary.LittleEndian, v)
 	}
 	for _, n := range t.nodes {
-		writeVec(n.centroid)
+		binary.Write(&b, binary.LittleEndian, n.centroid)
 		binary.Write(&b, binary.LittleEndian, uint32(len(n.children)))
 		binary.Write(&b, binary.LittleEndian, uint32(len(n.leaves)))
 		for _, x := range n.children {
@@ -630,12 +600,8 @@ func UnmarshalTree(data []byte) (Tree, error) {
 	t := Tree{dims: int(dims), fanout: int(h[1]), root: root, height: int(h[3]), leaves: make([][]float32, nLeaves), nodes: make([]treeNode, nNodes)}
 	readVec := func() ([]float32, error) {
 		v := make([]float32, t.dims)
-		for i := range v {
-			var x uint32
-			if binary.Read(r, binary.LittleEndian, &x) != nil {
-				return nil, errors.New("ivf: truncated tree")
-			}
-			v[i] = math.Float32frombits(x)
+		if binary.Read(r, binary.LittleEndian, v) != nil {
+			return nil, errors.New("ivf: truncated tree")
 		}
 		return v, nil
 	}

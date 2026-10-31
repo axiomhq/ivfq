@@ -327,13 +327,6 @@ func quantizeBits(vectors [][]float32, metric ivfq.Metric, rot *Rotation) (Quant
 	return Quantizer{Dims: dims, Code: b}, nil
 }
 
-func b2u(b bool) uint64 {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 // fillRows is fillRow over every non-nil row of work, simd.FillBlock rows at a
 // time: the residuals are laid out dimension-major, so each butterfly pair
 // is loaded once per block and rotates a contiguous run of simd.FillBlock
@@ -1019,11 +1012,7 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 	}
 	for r := range rows {
 		ip := s.ipOf(uint64(f.ones[r]), uint64(sums[r]))
-		if bounds != nil {
-			scores[r], bounds[r] = s.estimate(r, true, ip, true)
-		} else {
-			scores[r], _ = s.estimate(r, true, ip, false)
-		}
+		scores[r], bounds[r] = s.estimate(r, true, ip, true)
 	}
 }
 

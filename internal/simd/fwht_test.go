@@ -2,6 +2,7 @@ package simd
 
 import (
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"slices"
 	"testing"
@@ -28,7 +29,7 @@ func TestFWHTMatchesGeneric(t *testing.T) {
 			for i := range x {
 				var s float64
 				for j, v := range x {
-					s += float64(v) * float64(1-2*(popcount(i&j)&1))
+					s += float64(v) * float64(1-2*(bits.OnesCount(uint(i&j))&1))
 				}
 				if math.Abs(s-float64(got[i])) > 1e-4*float64(n) {
 					t.Fatalf("n=%d row %d: %v, want %v", n, i, got[i], s)
@@ -36,13 +37,6 @@ func TestFWHTMatchesGeneric(t *testing.T) {
 			}
 		}
 	}
-}
-
-func popcount(x int) (n int) {
-	for ; x != 0; x &= x - 1 {
-		n++
-	}
-	return
 }
 
 func TestFWHTRowsMatchesGeneric(t *testing.T) {

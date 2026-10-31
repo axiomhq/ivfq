@@ -288,9 +288,7 @@ func costWith(d2 []float32, vecs [][]float32, c []float32) float64 {
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				j := int(next.Add(1)) - 1
 				if j >= len(parts) {
@@ -299,7 +297,7 @@ func costWith(d2 []float32, vecs [][]float32, c []float32) float64 {
 				lo := j * chunk
 				parts[j] = chunkSum(lo, min(lo+chunk, n))
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	var sum float64
@@ -330,9 +328,7 @@ func minInto(d2 []float32, vecs [][]float32, c []float32) {
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				lo := int(next.Add(chunk)) - chunk
 				if lo >= n {
@@ -340,7 +336,7 @@ func minInto(d2 []float32, vecs [][]float32, c []float32) {
 				}
 				step(lo, min(lo+chunk, n))
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -476,9 +472,7 @@ func assignWith(ctx context.Context, n int, assign []int, work int, nearest func
 	var changed atomic.Bool
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for ctx.Err() == nil {
 				lo := int(next.Add(chunk)) - chunk
 				if lo >= n {
@@ -488,7 +482,7 @@ func assignWith(ctx context.Context, n int, assign []int, work int, nearest func
 					changed.Store(true)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return changed.Load()
