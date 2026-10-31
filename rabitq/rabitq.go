@@ -1116,6 +1116,92 @@ func (s *bitScorer) scoreBoundsGlobal(f *fastLayout, lo, hi []uint16, scores, bo
 	}
 }
 
+// scoreAllLazy fuses the column extrema into the global L2 score-only loop.
+// Keep ordinary score-only scoring separate so it pays no metadata-summary cost.
+func (s *bitScorer) scoreAllLazy(scores []float32) BoundHint {
+	f := s.b.fast
+	n := 32 * f.blocks
+	if cap(s.sums) < 2*n {
+		s.sums = make([]uint16, 2*n)
+	}
+	lo, hi := s.sums[:n], s.sums[n:2*n]
+	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	qn, low, delta, scale, inv := s.qNorm, s.low, s.delta, s.scale, s.inv
+	q2 := qn * qn
+	tail := s.delta*s.sumQ + float64(s.dims)*s.low
+	norms, aligns, ones, xbc := f.norms[:len(scores)], f.aligns[:len(scores)], f.ones[:len(scores)], f.xbc[:len(scores)]
+	lo, hi = lo[:len(scores)], hi[:len(scores)]
+	maxNorm, minAlign := 0.0, 1.0
+	for row := range scores {
+		align := float64(aligns[row])
+		if align > 1 {
+			maxNorm = math.Inf(1) // disable rejection outside the monotone sigma domain
+		}
+		if align == zeroRowAlign {
+			scores[row] = 0
+			continue
+		}
+		norm := float64(norms[row])
+		if norm > maxNorm {
+			maxNorm = norm
+		}
+		if norm > 0 && align > 0 && align < minAlign {
+			minAlign = align
+		}
+		dist2 := norm*norm + q2
+		if norm > 0 && qn > 0 && align > 0 {
+			w := float64(uint64(lo[row]) + 16*uint64(hi[row]))
+			dot := 2*(delta*w+low*float64(ones[row])) - tail
+			rip := (dot*scale - float64(xbc[row])) * inv
+			ip := rip / align
+			dist2 -= 2 * norm * qn * ip
+		}
+		gap := norm - qn
+		dist2 = max(dist2, gap*gap)
+		scores[row] = float32(-dist2)
+	}
+	return BoundHint{code: s.b, maxNorm: maxNorm, minAlign: minAlign}
+}
+
+// refineBounds rejects obvious losers, then batches the nibble accumulation
+// again: scalar nibble rescoring of the survivors costs more than a second scan.
+func (s *bitScorer) refineBounds(scores, bounds []float32, cutoff float32, slack float64) int {
+	below := -nextUp(-cutoff)
+	limit := -nextUp(-below)
+	// The loose envelope is nextUp(float32(float64(nextUp(score)) + slack)).
+	// For score < threshold it is <= below < cutoff. Round the subtraction
+	// down in both precisions to cover score rounding AND bound rounding.
+	threshold := -nextUp(-float32(math.Nextafter(float64(limit)-slack, math.Inf(-1))))
+	refined := 0
+	for row, score := range scores {
+		bounds[row] = below
+		if score < threshold {
+			continue
+		}
+		bounds[row] = float32(math.Inf(1))
+		refined++
+	}
+	if refined == 0 {
+		return 0
+	}
+	f := s.b.fast
+	n := 32 * f.blocks
+	if cap(s.sums) < 2*n {
+		s.sums = make([]uint16, 2*n)
+	}
+	lo, hi := s.sums[:n], s.sums[n:2*n]
+	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	for row := range bounds {
+		if bounds[row] < cutoff {
+			continue
+		}
+		w := uint64(lo[row]) + 16*uint64(hi[row])
+		rip := (s.ipOf(uint64(f.ones[row]), w) - float64(f.xbc[row])) * s.inv
+		_, bounds[row] = s.estimate(row, true, rip, true)
+	}
+	return refined
+}
+
 // scoreFast is estimate(r, true, ipOf(ones, sums[r]), false) for every
 // row, inlined: the same operations in the same order, so the same bits
 // (TestScoreAllMatchesRowByRow), without a call and two decodes per row.

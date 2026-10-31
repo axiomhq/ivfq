@@ -75,6 +75,7 @@ func checkScoreAll(t *testing.T, name string, s Scorer, rows int) {
 			t.Fatalf("%s row %d: ScoreAll without bounds %v, ScoreAndBound %v", name, r, only[r], ws)
 		}
 	}
+	checkLazyBounds(t, name, s, rows)
 }
 
 // A scorer rebound (With) from a packed column to an unpacked one of the

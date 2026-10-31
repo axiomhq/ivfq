@@ -53,6 +53,16 @@ exact := ivfq.Score(ivfq.L2, query, raw) // rerank the shortlist
 A row may be skipped by an exact top-k cutoff only when its bound is below
 the cutoff. The bound is probabilistic; `Query.Exact` drops it.
 
+For two-pass reranking, `Scorer.ScoreAllLazy(scores)` collects a `BoundHint`
+while scoring. After exactly reranking the shortlist, call
+`Scorer.RefineBounds(scores, bounds, cutoff, hint)` to avoid tight bounds for
+obvious losers. Packed global L2 scoring uses this shortcut; other bindings
+compute the original bounds. Keep the column unchanged and the cached scores
+in the current query's row order. Refined bounds support a rising cutoff;
+preserve the original rescue order and use strict `bound < cutoff` rejection.
+`ScoreAll` still returns every original score and bound bit for bit. See the
+executable `ExampleScorer_RefineBounds` in `rabitq/quant_test.go`.
+
 Splits and merges keep the clusters at their size as rows arrive: a split
 is `kmeans.Config{K: 2, Iters: kmeans.SplitIters}`, and `Policy`,
 `MergeTargets`, `SplitAbove` and `MergeBelow` decide when, reading only

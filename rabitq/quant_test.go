@@ -1,12 +1,15 @@
 package rabitq
 
 import (
+	"fmt"
+	"math"
 	"math/rand"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/axiomhq/ivfq"
+	"github.com/axiomhq/ivfq/rank"
 )
 
 // The codec-independent half of the package's tests: the corpora and the
@@ -139,4 +142,126 @@ func TestReboundScorerReadsTheNewColumn(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Exercise lazy scoring across the existing packed/borrowed/global/ordinary
+// matrix. The independent row estimator supplies the bound oracle.
+func checkLazyBounds(t *testing.T, name string, s Scorer, rows int) {
+	t.Helper()
+	scores, bounds := make([]float32, rows), make([]float32, rows)
+	hint := s.ScoreAllLazy(scores)
+	cuts := []float32{float32(math.Inf(-1)), float32(math.Inf(1)), float32(math.NaN()), 0, math.Float32frombits(1 << 31)}
+	if rows > 0 {
+		_, bound := s.ScoreAndBound(rows / 2)
+		cuts = append(cuts, bound, math.Nextafter32(bound, float32(math.Inf(-1))), math.Nextafter32(bound, float32(math.Inf(1))))
+	}
+	for _, cutoff := range cuts {
+		s.RefineBounds(scores, bounds, cutoff, hint)
+		for row := range scores {
+			wantScore, wantBound := s.ScoreAndBound(row)
+			if math.Float32bits(scores[row]) != math.Float32bits(wantScore) {
+				t.Fatalf("%s row %d: lazy score %g, want %g", name, row, scores[row], wantScore)
+			}
+			if (bounds[row] < cutoff) != (wantBound < cutoff) || bounds[row] < wantBound {
+				t.Fatalf("%s row %d: cutoff %g, lazy bound %g, want %g", name, row, cutoff, bounds[row], wantBound)
+			}
+			if !(bounds[row] < cutoff) && math.Float32bits(bounds[row]) != math.Float32bits(wantBound) {
+				t.Fatalf("%s row %d: survivor bound bits changed", name, row)
+			}
+		}
+	}
+}
+
+func TestRefineBoundsAfterRebinding(t *testing.T) {
+	c, rot := globalColumn(t, corpus(35, 128), ivfq.L2)
+	var s Scorer
+	q := NewQuery(corpus(1, 128)[0], ivfq.L2, rot).Global(rot)
+	if !s.BindGlobal(&c, q) {
+		t.Fatal("global bind failed")
+	}
+	scores, bounds := make([]float32, c.Rows()), make([]float32, c.Rows())
+	hint := s.ScoreAllLazy(scores)
+	// Reuse the metadata hint, but rescore for each new query and confidence.
+	for _, sigmas := range []float64{0.01, 3.2, math.Inf(1)} {
+		t.Run(fmt.Sprint(sigmas), func(t *testing.T) {
+			q := NewQuery(offCentre(1, 128, 3)[0], ivfq.L2, rot).Global(rot)
+			q.Sigmas = sigmas
+			if !s.BindGlobal(&c, q) {
+				t.Fatal("global rebind failed")
+			}
+			s.ScoreAll(scores, nil)
+			for _, cutoff := range []float32{-1e6, 0} {
+				s.RefineBounds(scores, bounds, cutoff, hint)
+				for row := range bounds {
+					_, want := s.ScoreAndBound(row)
+					if (bounds[row] < cutoff) != (want < cutoff) || bounds[row] < want {
+						t.Fatalf("row %d: cutoff %g, rebound %g, want %g", row, cutoff, bounds[row], want)
+					}
+				}
+			}
+			checkLazyBounds(t, "rebound", s, c.Rows())
+		})
+	}
+	if !s.BindGlobal(&c, q) {
+		t.Fatal("original rebind failed")
+	}
+	other, err := c.Select([]int{34, 0, 17})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.PackFastScanFrame(RotateCentroid(other.Code.Centroid, rot))
+	s.Use(&other)
+	s.ScoreAll(scores, nil)
+	for _, h := range []BoundHint{hint, {}} {
+		if n := s.RefineBounds(scores, bounds, 0, h); n != other.Rows() {
+			t.Fatalf("foreign/zero hint evaluated %d bounds, want %d", n, other.Rows())
+		}
+		for row := range other.Rows() {
+			_, want := s.ScoreAndBound(row)
+			if math.Float32bits(bounds[row]) != math.Float32bits(want) {
+				t.Fatalf("foreign/zero hint changed bound at row %d", row)
+			}
+		}
+	}
+}
+
+func ExampleScorer_RefineBounds() {
+	rows := [][]float32{{0}, {1}, {8}, {9}, {10}}
+	rot := NewRotation(11, 1)
+	col, err := Quantize(rows, Options{Metric: ivfq.L2, Rotation: rot})
+	if err != nil {
+		panic(err)
+	}
+	col.PackFastScanFrame(RotateCentroid(col.Code.Centroid, rot))
+	query := []float32{0.9}
+	var s Scorer
+	if !s.BindGlobal(&col, NewQuery(query, ivfq.L2, rot).Global(rot)) {
+		panic("global bind failed")
+	}
+	scores, bounds := make([]float32, col.Rows()), make([]float32, col.Rows())
+	hint := s.ScoreAllLazy(scores)
+	shortlist := rank.NewTopK(2)
+	for row, score := range scores {
+		shortlist.Push(fmt.Sprint(row), score)
+	}
+	top := rank.NewTopK(1)
+	seen := make(map[string]bool)
+	for _, hit := range shortlist.Hits() {
+		var row int
+		fmt.Sscan(hit.ID, &row)
+		top.Push(hit.ID, ivfq.Score(ivfq.L2, query, rows[row]))
+		seen[hit.ID] = true
+	}
+	cutoff, _ := top.Cutoff() // the exact top-k is full before pruning
+	s.RefineBounds(scores, bounds, cutoff.Score, hint)
+	for row, bound := range bounds {
+		id := fmt.Sprint(row)
+		if bound < cutoff.Score || seen[id] {
+			continue
+		}
+		top.Push(id, ivfq.Score(ivfq.L2, query, rows[row]))
+		cutoff, _ = top.Cutoff() // only rises; retain original row order
+	}
+	fmt.Println(top.Hits()[0].ID)
+	// Output: 1
 }

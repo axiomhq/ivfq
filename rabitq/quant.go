@@ -458,6 +458,65 @@ func (s Scorer) ScoreAll(scores, bounds []float32) {
 	s.bit.scoreAll(scores, bounds)
 }
 
+// BoundHint is the column metadata collected by ScoreAllLazy for RefineBounds.
+// It is query-independent and retains the column: do not mutate its codes,
+// norms, alignments or frame while using the hint. Clear saved hints when done
+// to release their column references. The zero value disables coarse rejection.
+type BoundHint struct {
+	code              *Code
+	maxNorm, minAlign float64
+}
+
+// ScoreAllLazy writes Score's bits and collects a BoundHint during the same
+// pass. Use it when exact reranking of a shortlist will establish a cutoff
+// before RefineBounds runs. scores must have at least Rows() entries.
+// Currently only packed global L2 scoring collects a hint; other bindings
+// score normally and return a zero hint. ScoreAll's contract is unchanged.
+func (s Scorer) ScoreAllLazy(scores []float32) BoundHint {
+	scores = scores[:s.bit.b.Rows()]
+	b := s.bit
+	if !b.l2 || b.exact || b.g == nil {
+		b.scoreAll(scores, nil)
+		return BoundHint{}
+	}
+	return b.scoreAllLazy(scores)
+}
+
+// RefineBounds writes upper bounds using a hint from ScoreAllLazy and unchanged
+// scores in the current binding's row order. scores and bounds must each have
+// at least Rows() entries and must not overlap. scores is not modified.
+//
+// A bound below cutoff may be looser than ScoreAndBound's bound, never lower;
+// every other bound matches it bit for bit. Thus strict bound < cutoff tests
+// give the same decisions, including ties. These bounds can be reused with a
+// rising cutoff, not a falling one; preserve the caller's original row order.
+// The confidence is still Query.Sigmas, not an exact-distance guarantee.
+//
+// The hint's column must remain unchanged. After rebinding, supply scores for
+// that binding; the allowance is calculated from its current query parameters.
+// A zero or foreign-column hint, or an unsupported binding, computes all tight
+// bounds. The return value is the number of tight bounds evaluated.
+func (s Scorer) RefineBounds(scores, bounds []float32, cutoff float32, hint BoundHint) int {
+	b := s.bit
+	rows := b.b.Rows()
+	scores, bounds = scores[:rows], bounds[:rows]
+	slack := math.Inf(1)
+	supported := b.l2 && !b.exact && b.g != nil
+	if supported && hint.code == b.b {
+		// Match the original sigma/slack operation order. The extrema bound
+		// each row's untightened slack; tightening can only reduce it.
+		sigma := math.Sqrt((1-hint.minAlign*hint.minAlign)/b.freeD+b.varQ) / hint.minAlign
+		slack = 2 * hint.maxNorm * b.qNorm * b.sigmas * sigma
+	}
+	if !(slack >= 0) || math.IsInf(slack, 1) {
+		for row := range bounds {
+			_, bounds[row] = b.scoreAndBound(row)
+		}
+		return rows
+	}
+	return b.refineBounds(scores, bounds, cutoff, slack)
+}
+
 // Score is ScoreAndBound's estimate alone, bit for bit, without the
 // bound's arithmetic: a probe reads bounds only for its nearest hoods.
 func (s Scorer) Score(row int) float32 { return s.bit.score(row) }
