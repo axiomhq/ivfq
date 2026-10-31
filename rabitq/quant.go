@@ -64,7 +64,9 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 	unit := opts.Metric == ivfq.Cosine
 	c := append([]float32(nil), centroid...)
 	if unit {
-		c = workRow(c, true)
+		if normalized := workRow(c, true); normalized != nil {
+			c = normalized
+		}
 	}
 	return Quantizer{Dims: opts.Rotation.dims, Code: &Code{Centroid: c, Seed: opts.Rotation.seed, Unit: unit}}, nil
 }
@@ -340,6 +342,7 @@ func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q
 // hundreds of times).
 func (q Query) Rotated(rot *Rotation) Query {
 	q.Rotation = rot
+	q.global = nil
 	if rot == nil || len(q.Vector) < rot.dims {
 		q.rotated = nil
 		return q

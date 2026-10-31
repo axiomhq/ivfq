@@ -63,7 +63,7 @@ func (b *BinReader) Dims() int { return b.h.dims }
 
 // Skip positions the reader at row rows, counted from the start of the file.
 func (b *BinReader) Skip(rows int) error {
-	if rows <= 0 {
+	if rows < 0 {
 		return nil
 	}
 	if _, err := b.f.Seek(int64(8+rows*b.h.dims*b.elem), io.SeekStart); err != nil {

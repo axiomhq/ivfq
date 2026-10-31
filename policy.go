@@ -381,7 +381,7 @@ func MergeOwed(stats []ClusterStat) bool {
 	below, above := MergeBelow(total), SplitAbove(total)
 	smallest := smallestOther(stats)
 	for i, s := range stats {
-		if s.Count == 0 || s.Count <= below && s.Count+smallest(i) <= above {
+		if s.Count == 0 || len(stats) > 1 && s.Count <= below && s.Count+smallest(i) <= above {
 			return true
 		}
 	}

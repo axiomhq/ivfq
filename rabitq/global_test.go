@@ -95,6 +95,31 @@ func TestBindGlobalDeclines(t *testing.T) {
 	}
 }
 
+func TestRotatedInvalidatesGlobal(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		t.Run(metric.String(), func(t *testing.T) {
+			v := corpus(35, 64)
+			c, rot := globalColumn(t, v, metric)
+			other := NewRotation(99, 64)
+			q := NewQuery(v[1], metric, other).Global(other).Rotated(rot)
+			var s, fresh Scorer
+			if s.BindGlobal(&c, q) {
+				t.Fatal("bound stale global tables after changing rotation")
+			}
+			if !s.BindGlobal(&c, q.Global(rot)) || !fresh.BindGlobal(&c, NewQuery(v[1], metric, rot).Global(rot)) {
+				t.Fatal("rebuilt global query did not bind")
+			}
+			for row := range c.Rows() {
+				gs, gb := s.ScoreAndBound(row)
+				ws, wb := fresh.ScoreAndBound(row)
+				if math.Float32bits(gs) != math.Float32bits(ws) || math.Float32bits(gb) != math.Float32bits(wb) {
+					t.Fatalf("row %d: rebuilt (%g,%g), fresh (%g,%g)", row, gs, gb, ws, wb)
+				}
+			}
+		})
+	}
+}
+
 // The global query's bound holds at its confidence, as the per-column
 // bound does (TestBitBoundCoversAtItsConfidence), on the same corpora and
 // one far from the origin. It also logs the estimate's RMS error and the

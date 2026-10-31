@@ -330,6 +330,13 @@ func TestMergeTargetKeepsTheHostUnderTheSplitTrigger(t *testing.T) {
 	if tiny, host, ok := mergeTarget(stats(roomy), centroids); !ok || tiny != 0 || host != 1 {
 		t.Fatalf("merge %d into %d (ok %v); want the smallest tiny, 0, into its nearest neighbour 1", tiny, host, ok)
 	}
+	// A lone cluster has no merge partner, but an empty one still owes a reclaim.
+	if MergeOwed(nil) || MergeOwed(stats([]int{1})) {
+		t.Fatal("owed a merge without a partner")
+	}
+	if !MergeOwed(stats([]int{0})) {
+		t.Fatal("a lone empty cluster is not owed")
+	}
 	// An empty cluster is owed a reclaim.
 	empty := append([]int{}, full...)
 	empty[0] = 0

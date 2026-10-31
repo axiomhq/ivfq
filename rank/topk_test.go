@@ -2,6 +2,7 @@ package rank
 
 import (
 	"math/rand"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -85,5 +86,25 @@ func TestTopKCutoff(t *testing.T) {
 	top.Push("a", 1)
 	if got, ok := top.Cutoff(); !ok || got.ID != "b" || got.Score != 1 {
 		t.Fatalf("cutoff = %+v, %v", got, ok)
+	}
+}
+
+func TestTopKPushAfterHits(t *testing.T) {
+	top := NewTopK(2)
+	top.Push("a", 1)
+	top.Push("b", 2)
+	hits := top.Hits()
+	if want := []Hit{{"b", 2}, {"a", 1}}; !slices.Equal(hits, want) {
+		t.Fatalf("hits = %v, want %v", hits, want)
+	}
+	if got, ok := top.Cutoff(); !ok || got != (Hit{"a", 1}) {
+		t.Errorf("cutoff after Hits = %+v, %v", got, ok)
+	}
+	top.Push("c", 1.5)
+	if got, want := top.Hits(), []Hit{{"b", 2}, {"c", 1.5}}; !slices.Equal(got, want) {
+		t.Fatalf("hits after Push = %v, want %v", got, want)
+	}
+	if !slices.Equal(hits, []Hit{{"b", 2}, {"a", 1}}) {
+		t.Fatalf("Push mutated earlier hits: %v", hits)
 	}
 }

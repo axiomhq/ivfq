@@ -50,6 +50,12 @@ func TestBinReader(t *testing.T) {
 		if _, err := b.Next(3); err != io.EOF {
 			t.Fatalf("%s: end %v, want io.EOF", c.name, err)
 		}
+		if err := b.Skip(0); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := b.Next(1); err != nil || !reflect.DeepEqual(got, [][]float32{{0, 1}}) {
+			t.Fatalf("%s: after rewind %v, %v", c.name, got, err)
+		}
 		if err := b.Close(); err != nil {
 			t.Fatal(err)
 		}

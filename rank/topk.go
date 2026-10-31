@@ -2,6 +2,7 @@ package rank
 
 import (
 	"container/heap"
+	"slices"
 	"sort"
 )
 
@@ -70,11 +71,11 @@ func (t *TopK) Cutoff() (Hit, bool) {
 	return t.h[0], true
 }
 
-// Hits returns the selected hits in result order: score desc, ties by ID asc.
+// Hits returns a copy of the selected hits in result order: score desc, ties by ID asc.
 // Nothing selected yields nil, exactly as a truncating sort would. The sort
 // here is over at most k elements, not over the candidates.
 func (t *TopK) Hits() []Hit {
-	out := []Hit(t.h)
+	out := slices.Clone([]Hit(t.h))
 	sort.Slice(out, func(i, j int) bool { return worse(out[j], out[i]) })
 	return out
 }

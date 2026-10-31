@@ -65,18 +65,6 @@ func BenchmarkEncode(b *testing.B) {
 	}
 }
 
-// packFrame packs c for BindGlobal: the fast-scan layout plus the column's
-// centroid (the mean of its rows) rotated into the codes' frame.
-func packFrame(c *rabitq.Quantizer, vecs [][]float32, rot *rabitq.Rotation) {
-	cent := make([]float32, len(vecs[0]))
-	for _, v := range vecs {
-		for j, x := range v {
-			cent[j] += x / float32(len(vecs))
-		}
-	}
-	c.PackFastScanFrame(rabitq.RotateCentroid(cent, rot))
-}
-
 // Bind: per-query, per-cluster setup (ivfq quantizes the query residual to the
 // cluster centroid; weaviate quantizes the query once, to five planes, and
 // reuses it for every code).
@@ -99,7 +87,7 @@ func BenchmarkBind(b *testing.B) {
 			pairs(b, 4*d, func(i int) { _ = rabitq.NewQuery(qs[i], ivfq.L2, rot).Global(rot) })
 		})
 		pc := c
-		packFrame(&pc, vecs, rot)
+		pc.PackFastScanFrame(rabitq.RotateCentroid(pc.Code.Centroid, rot))
 		gq := rabitq.NewQuery(qs[0], ivfq.L2, rot).Global(rot)
 		b.Run(fmt.Sprintf("d=%d/ivfq_BindGlobal(per column)", d), func(b *testing.B) {
 			var s rabitq.Scorer
@@ -164,7 +152,7 @@ func BenchmarkScan(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("d=%d/ivfq_ScoreAll(packed,global)", d), func(b *testing.B) {
 			p := c
-			packFrame(&p, vecs, rot)
+			p.PackFastScanFrame(rabitq.RotateCentroid(p.Code.Centroid, rot))
 			var s rabitq.Scorer
 			if !s.BindGlobal(&p, rabitq.NewQuery(q, ivfq.L2, rot).Global(rot)) {
 				b.Fatal("not bound")
@@ -256,8 +244,9 @@ func TestEstimatorQuality(t *testing.T) {
 				r2 := rand.New(rand.NewPCG(7, uint64(d)))
 				centres := randF32(64, d, r2)
 				for i := range qv {
+					centre := centres[r.IntN(64)]
 					for j := range qv[i] {
-						qv[i][j] = centres[r.IntN(64)][j] + 0.3*float32(r.NormFloat64())
+						qv[i][j] = centre[j] + 0.3*float32(r.NormFloat64())
 					}
 				}
 			}

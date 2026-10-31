@@ -74,6 +74,32 @@ func TestRerankSupersetProperty(t *testing.T) {
 	}
 }
 
+func TestEmptyZeroCosineCentroid(t *testing.T) {
+	rot := NewRotation(1, 1)
+	c, err := Empty([]float32{0}, Options{Metric: ivfq.Cosine, Rotation: rot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := c.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = UnmarshalBinary(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = AppendRows(c, rot, [][]float32{{1}, {-1}, {0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Scorer(NewQuery([]float32{1}, ivfq.Cosine, rot))
+	for row, want := range []float32{1, -1, 0} {
+		if got := s.Score(row); got != want {
+			t.Fatalf("row %d: score %g, want %g", row, got, want)
+		}
+	}
+}
+
 // Rerank scores candidate IDs exactly and returns the best k, with lower IDs
 
 // winning equal scores. exactDistance must return a higher-is-better score.
