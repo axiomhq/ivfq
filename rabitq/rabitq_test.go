@@ -1,7 +1,10 @@
 package rabitq
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
@@ -237,10 +240,14 @@ func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 // spread. Anything else would call sampling noise a bias.
 
 func TestBitEstimatorIsUnbiased(t *testing.T) {
-	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+	for _, tc := range []struct {
+		metric ivfq.Metric
+		bits   int
+	}{{ivfq.L2, 0}, {ivfq.Cosine, 0}, {ivfq.L2, 2}, {ivfq.Cosine, 2}} {
+		metric := tc.metric
 		vectors := corpus(2000, 128)
 		queries := corpus(60, 128)
-		codes := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
+		codes := mustEncode(t, vectors, exOpts(metric, len(vectors[0]), tc.bits))
 		perQuery := make([]float64, len(queries))
 		var absSum, spread float64
 		for i, q := range queries {
@@ -304,8 +311,12 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 		{"clustered", clusteredCorpus(3000, 16, 128), clusteredCorpus(40, 16, 128)},
 		{"axis-aligned", axis(3000, 128), axis(40, 128)},
 	} {
-		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
-			codes := mustEncode(t, tc.v, bitOpts(metric, len(tc.v[0])))
+		for _, mb := range []struct {
+			metric ivfq.Metric
+			bits   int
+		}{{ivfq.L2, 0}, {ivfq.Cosine, 0}, {ivfq.L2, 2}, {ivfq.Cosine, 2}} {
+			metric := mb.metric
+			codes := mustEncode(t, tc.v, exOpts(metric, len(tc.v[0]), mb.bits))
 			// Two settings of eps0 two orders of magnitude of tail apart:
 			// the shipped one, and a loose one where a miscalibrated bound
 			// would show up as a coverage that does not follow it.
@@ -325,8 +336,8 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 				}
 				share := float64(over) / float64(total)
 				tail := 0.5 * math.Erfc(sigmas/math.Sqrt2) // one-sided normal
-				t.Logf("%s %s at %.1f sigmas: %d/%d rows above the bound (%.5f against the %.5f tail)",
-					tc.name, metric, sigmas, over, total, share, tail)
+				t.Logf("%s %s ex%d at %.1f sigmas: %d/%d rows above the bound (%.5f against the %.5f tail)",
+					tc.name, metric, mb.bits, sigmas, over, total, share, tail)
 				// Conservative is required; wildly conservative would mean
 				// the bound is not the confidence it claims, and would cost
 				// the bound pass rows for nothing.
@@ -617,7 +628,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 				if rows > 2 {
 					vectors[1] = slices.Clone(vectors[2]) // duplicates pull a row onto the mean when rows == 2
 				}
-				got, err := quantizeBits(vectors, metric, NewRotation(11, dims))
+				got, err := quantizeBits(vectors, metric, NewRotation(11, dims), 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -642,7 +653,7 @@ func TestFillRowsMatchesFillRow(t *testing.T) {
 		}
 	}
 	// A hood of one row: the row is its own centroid, zero norm, no bits.
-	q, err := quantizeBits([][]float32{{1, 2, 3}}, ivfq.L2, NewRotation(5, 3))
+	q, err := quantizeBits([][]float32{{1, 2, 3}}, ivfq.L2, NewRotation(5, 3), 0)
 	if err != nil || q.Code.Norms[0] != 0 || q.Code.Aligns[0] != 0 || q.Code.Words[0] != 0 {
 		t.Fatalf("single row: %+v %v", q.Code, err)
 	}
@@ -760,6 +771,180 @@ func TestTruncRoundIsRound(t *testing.T) {
 		}
 		if tr != math.Round(y) {
 			t.Fatalf("y=%v: %v, math.Round %v", y, tr, math.Round(y))
+		}
+	}
+}
+
+// v1Fixture is MarshalBinary at 0f48cd2 (before ex codes) of corpus(3, 33)
+// with row 1 zeroed, cosine, rotation 9.
+const v1Fixture = "44514231010001042100000003000000090000000000000070de88bcc97308bed1224abda00c593c6c8e2b3e5473bfbb2c326e3d6633ca3d8a441a3ea2efd8bd167586bd139560bdd821a6bd14253b3d68d50c3ec6ab20be18bfe03b92fe99be3e4b12be3400eabdb452d7bdc152e83d50407abdd71a22bde41075bea03804bd620ede3deef13e3d9fcd06bd308ffcbd4645b63d1e749f3d39a104beb3a5413f00000000b3a5413f8529493f000080bf8529493f924335ab0000000000000000000000006dbcca5401000000"
+
+func exOpts(metric ivfq.Metric, dims, bits int) Options {
+	o := bitOpts(metric, dims)
+	o.ExBits = bits
+	return o
+}
+
+// Old columns still load, and ExBits 0 still writes them byte for byte.
+func TestV1ColumnsStillLoad(t *testing.T) {
+	old, err := hex.DecodeString(v1Fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnmarshalBinary(old)
+	if err != nil || got.Rows() != 3 || got.Code.ExBits != 0 {
+		t.Fatalf("v1 decode: %v", err)
+	}
+	v := corpus(3, 33)
+	v[1] = make([]float32, 33)
+	now, err := mustEncode(t, v, Options{Metric: ivfq.Cosine, Rotation: NewRotation(9, 33)}).MarshalBinary()
+	if err != nil || !bytes.Equal(now, old) {
+		t.Fatalf("ExBits 0 no longer writes v1: %v", err)
+	}
+}
+
+// An ex column round-trips through every representation (owned, borrowed,
+// rows-only, packed, Select, AppendRows) to the same bytes and scores, and
+// its decoder refuses ex metadata the encoder cannot produce.
+func TestExCodesRoundTrip(t *testing.T) {
+	for _, bits := range []int{1, 2} {
+		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+			name := fmt.Sprintf("%s/ex%d", metric, bits)
+			v := corpus(40, 33) // padding in the last word
+			v[7] = make([]float32, 33)
+			c := mustEncode(t, v, exOpts(metric, 33, bits))
+			data, err := c.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := bitsHeader + 4*33 + 8*40 + 8*40 + 1 + 8*40*bits + 8*40; len(data) != n || binary.LittleEndian.Uint16(data[4:]) != exVersion {
+				t.Fatalf("%s: %d bytes, want %d", name, len(data), n)
+			}
+			owned, err := UnmarshalBinary(data)
+			if err != nil || !reflect.DeepEqual(owned, c) {
+				t.Fatalf("%s owned round trip: %v", name, err)
+			}
+			borrowed, err := UnmarshalBinaryBorrowed(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rowsData, err := c.MarshalRows()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := UnmarshalRowsBorrowed(rowsData, c.Code.Centroid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packed, _ := UnmarshalBinary(data)
+			packed.PackFastScan()
+			order := make([]int, len(v))
+			for i := range order {
+				order[i] = len(v) - 1 - i
+			}
+			selected, err := c.Select(order)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := NewQuery(v[3], metric, rotOf(c))
+			for _, col := range []struct {
+				name string
+				q    Quantizer
+				perm bool
+			}{{"borrowed", borrowed, false}, {"rows", rows, false}, {"packed", packed, false}, {"select", selected, true}} {
+				for r := range v {
+					src := r
+					if col.perm {
+						src = order[r]
+					}
+					gs, gb := col.q.ScoreAndBound(q, r)
+					ws, wb := c.ScoreAndBound(q, src)
+					if gs != ws || gb != wb {
+						t.Fatalf("%s %s row %d: (%v,%v), want (%v,%v)", name, col.name, r, gs, gb, ws, wb)
+					}
+				}
+			}
+			for _, col := range []Quantizer{borrowed, packed} {
+				if back, err := col.MarshalBinary(); err != nil || !bytes.Equal(back, data) {
+					t.Fatalf("%s: re-marshal differs: %v", name, err)
+				}
+			}
+			if metric == ivfq.L2 { // cosine's Empty normalizes the centroid
+				empty, err := Empty(c.Code.Centroid, exOpts(metric, 33, bits))
+				if err != nil {
+					t.Fatal(err)
+				}
+				grown, err := AppendRows(empty, rotOf(c), v)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, _ := grown.MarshalBinary(); !bytes.Equal(got, data) {
+					t.Fatalf("%s: AppendRows onto Empty differs from Quantize", name)
+				}
+				twice, err := AppendRows(packed, rotOf(c), v[:5])
+				if err != nil {
+					t.Fatal(err)
+				}
+				for r := range 5 {
+					if a, b := twice.Score(q, len(v)+r), c.Score(q, r); a != b {
+						t.Fatalf("%s: appended row %d scores %v, want %v", name, r, a, b)
+					}
+				}
+			}
+			exOff := len(data) - (1 + 8*40*bits + 8*40)
+			norms := exOff + 1 + 8*40*bits
+			for what, corrupt := range map[string]func([]byte) []byte{
+				"zero ex bits": func(d []byte) []byte { d[exOff] = 0; return d },
+				"7 ex bits":    func(d []byte) []byte { d[exOff] = 7; return d },
+				"short":        func(d []byte) []byte { return d[:len(d)-1] },
+				"NaN ex norm": func(d []byte) []byte {
+					binary.LittleEndian.PutUint32(d[norms:], math.Float32bits(float32(math.NaN())))
+					return d
+				},
+				"tiny ex norm":   func(d []byte) []byte { binary.LittleEndian.PutUint32(d[norms:], math.Float32bits(1)); return d },
+				"ex align > 1":   func(d []byte) []byte { binary.LittleEndian.PutUint32(d[norms+4*40:], math.Float32bits(1.5)); return d },
+				"ex bit padding": func(d []byte) []byte { d[exOff+1+7] |= 0x80; return d },
+				"v1 with ex":     func(d []byte) []byte { binary.LittleEndian.PutUint16(d[4:], bitsVersion); return d },
+			} {
+				bad := corrupt(slices.Clone(data))
+				if _, err := UnmarshalBinary(bad); err == nil {
+					t.Fatalf("%s: accepted %s", name, what)
+				}
+				if _, err := UnmarshalBinaryBorrowed(bad); err == nil {
+					t.Fatalf("%s: borrowed accepted %s", name, what)
+				}
+			}
+		}
+	}
+	if _, err := Quantize(corpus(2, 8), exOpts(ivfq.L2, 8, maxExBits+1)); err == nil {
+		t.Fatal("accepted too many ex bits")
+	}
+}
+
+// More ex bits estimate closer: on the same rows and queries, the mean
+// |estimate - exact| of the squared distance falls with each bit, by the
+// margin the code's alignment promises (a 3-bit code's error is well under
+// half the 1-bit code's). A scorer that ignored the ex planes, or read them
+// with the wrong sign, would not.
+func TestExEstimateErrorDropsWithBits(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		vectors := clusteredCorpus(2000, 8, 128)
+		queries := clusteredCorpus(30, 8, 128)
+		var errs [3]float64
+		for bits := range errs {
+			c := mustEncode(t, vectors, exOpts(metric, 128, bits))
+			c.PackFastScan()
+			scores := make([]float32, len(vectors))
+			for _, q := range queries {
+				c.Scorer(NewQuery(q, metric, rotOf(c))).ScoreAll(scores, nil)
+				for row, v := range vectors {
+					errs[bits] += math.Abs(float64(scores[row] - ivfq.Score(metric, q, v)))
+				}
+			}
+		}
+		t.Logf("%s: mean |error| 1-bit %.4g, ex1 %.4g, ex2 %.4g", metric, errs[0], errs[1], errs[2])
+		if !(errs[1] < 0.65*errs[0] && errs[2] < 0.4*errs[0] && errs[2] < 0.7*errs[1]) {
+			t.Fatalf("%s: error does not fall with ex bits: %v", metric, errs)
 		}
 	}
 }

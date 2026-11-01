@@ -23,8 +23,8 @@ type Quantizer struct {
 func (c Quantizer) Rows() int { return c.Code.Rows() }
 
 // Retained is the bytes the column holds in memory of its own: zero for a
-// column UnmarshalBinaryBorrowed aliased onto its input, the payload's size
-// otherwise.
+// column UnmarshalBinaryBorrowed aliased onto its input (plus its ex code,
+// which is always decoded), the payload's size otherwise.
 func (c Quantizer) Retained() int { return c.Code.retained() }
 
 // Options is what Quantize needs beyond the vectors: the metric (cosine
@@ -33,15 +33,30 @@ func (c Quantizer) Retained() int { return c.Code.retained() }
 type Options struct {
 	Metric   ivfq.Metric
 	Rotation *Rotation
+	// ExBits is the extended RaBitQ code's bits per dimension past the
+	// sign bit (Code.ExBits), at most 6: 0 is the 1-bit code alone and
+	// its format; 2 is a 3-bit code at 3*dims/8 + 16 bytes a row, scored
+	// in full by its ex code (Scorer).
+	ExBits int
+}
+
+func (o Options) check() error {
+	if o.Rotation == nil {
+		return errors.New("rabitq: 1-bit codes need a rotation")
+	}
+	if o.ExBits < 0 || o.ExBits > maxExBits {
+		return fmt.Errorf("rabitq: %d ex bits, want 0 to %d", o.ExBits, maxExBits)
+	}
+	return nil
 }
 
 // Quantize is the ONE door a hood's codes are written through. vectors are the hood's rows in id order, already at
 // the precision the exact rerank will read them at.
 func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
-	if opts.Rotation == nil {
-		return Quantizer{}, errors.New("rabitq: 1-bit codes need a rotation")
+	if err := opts.check(); err != nil {
+		return Quantizer{}, err
 	}
-	return quantizeBits(vectors, opts.Metric, opts.Rotation)
+	return quantizeBits(vectors, opts.Metric, opts.Rotation, opts.ExBits)
 }
 
 // Empty returns a column with no rows around centroid, in opts' frame:
@@ -49,8 +64,8 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 // is encoded against the cluster's own centroid rather than the mean of
 // whichever rows happened to start the block.
 func Empty(centroid []float32, opts Options) (Quantizer, error) {
-	if opts.Rotation == nil {
-		return Quantizer{}, errors.New("rabitq: 1-bit codes need a rotation")
+	if err := opts.check(); err != nil {
+		return Quantizer{}, err
 	}
 	if opts.Rotation.dims <= 0 || len(centroid) != opts.Rotation.dims {
 		return Quantizer{}, fmt.Errorf("rabitq: empty column needs a %d-wide centroid, got %d", opts.Rotation.dims, len(centroid))
@@ -68,7 +83,7 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 			c = normalized
 		}
 	}
-	return Quantizer{Dims: opts.Rotation.dims, Code: &Code{Centroid: c, Seed: opts.Rotation.seed, Unit: unit}}, nil
+	return Quantizer{Dims: opts.Rotation.dims, Code: &Code{Centroid: c, Seed: opts.Rotation.seed, Unit: unit, ExBits: opts.ExBits}}, nil
 }
 
 // Select returns a column holding only the rows at the given indexes, in
@@ -101,6 +116,7 @@ func (c Quantizer) Select(rows []int) (Quantizer, error) {
 			out.Centroid[i] = b.centroid(i)
 		}
 	}
+	out.allocEx(b.ExBits, len(rows))
 	for j, r := range rows {
 		if r < 0 || r >= b.Rows() {
 			return Quantizer{}, fmt.Errorf("quant: row %d out of range for a %d-row column", r, b.Rows())
@@ -113,6 +129,9 @@ func (c Quantizer) Select(rows []int) (Quantizer, error) {
 		} else {
 			copy(out.Words[j*w:(j+1)*w], b.Words[r*w:(r+1)*w])
 			out.Norms[j], out.Aligns[j] = b.Norms[r], b.Aligns[r]
+		}
+		if b.ExBits > 0 {
+			b.copyEx(out, j, r)
 		}
 	}
 	return Quantizer{Dims: c.Dims, Code: out}, nil
@@ -152,6 +171,12 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 			out.Centroid[i] = b.centroid(i)
 		}
 	}
+	out.allocEx(b.ExBits, rows+extra)
+	if b.ExBits > 0 {
+		for r := range rows {
+			b.copyEx(out, r, r)
+		}
+	}
 	if b.borrowed != nil || b.Words == nil {
 		for i := 0; i < rows*w; i++ {
 			out.Words[i] = b.word(i)
@@ -177,6 +202,17 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 		out.fillRow(rows+i, row, rot, scratch)
 	}
 	return Quantizer{Dims: dims, Code: out}, nil
+}
+
+// copyEx copies row r's ex code of b into row j of out.
+func (b *Code) copyEx(out *Code, j, r int) {
+	w := bitWords(b.width())
+	for p := range b.ExBits {
+		for g := range w {
+			out.Ex[(j*b.ExBits+p)*w+g] = b.exWord(r, p, g)
+		}
+	}
+	out.ExNorms[j], out.ExAligns[j] = b.ExNorms[r], b.ExAligns[r]
 }
 
 func (c Quantizer) MarshalBinary() ([]byte, error) {

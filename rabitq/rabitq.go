@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/rand/v2"
+	"sync"
 
 	"github.com/axiomhq/ivfq"
 	"github.com/axiomhq/ivfq/internal/simd"
@@ -51,8 +53,12 @@ const (
 	rowsMagic = "DQR1"
 	// bitsHeader is magic(4) version(2) metric(1) qbits(1) dims(4) rows(4)
 	// seed(8).
-	bitsHeader   = 24
-	bitsVersion  = 1
+	bitsHeader  = 24
+	bitsVersion = 1
+	// exVersion is bitsVersion's layout followed by the ex code: ExBits
+	// (one byte), then rows*ExBits*words plane words, ExNorms, ExAligns.
+	// A column with no ex bits is written as bitsVersion, byte for byte.
+	exVersion    = 2
 	queryBits    = 4
 	queryLevels  = 1<<queryBits - 1
 	metricRaw    = 0 // rows are the vectors themselves (l2)
@@ -109,6 +115,18 @@ type Code struct {
 	// residual of the NORMALIZED vector, so the estimator's squared
 	// distance maps to cosine as 1 - d^2/2.
 	Unit bool
+	// ExBits is the extended code's bits per dimension past the sign
+	// (extended RaBitQ, Gao et al., arXiv:2409.09913); 0 is the 1-bit code
+	// alone. Row i's code is c_j = bit_j*2^ExBits + low_j over ExBits+1
+	// bits, and stands for y_j = c_j - (2^(ExBits+1)-1)/2 = ±(e_j + 1/2),
+	// e_j < 2^ExBits the scaled |x_j| (exCode). Ex holds low_j as ExBits
+	// planes of ceil(dims/64) words per row (plane p of row i at
+	// (i*ExBits+p)*words), the sign plane is Words; ExNorms is ||y|| and
+	// ExAligns <y, x>/||y||, the ex estimator's alignment.
+	ExBits   int
+	Ex       []uint64
+	ExNorms  []float32
+	ExAligns []float32
 	// borrowed is the encoded column UnmarshalBinaryBorrowed aliased, read
 	// in place; every other column keeps the typed slices above.
 	borrowed []byte
@@ -139,6 +157,10 @@ type fastLayout struct {
 	xbc []float32
 	rc  []float32
 	rcc float64
+	// exNibs is the ex planes laid out as nibs, plane p at p*len(nibs),
+	// and exSum each row's Σ_j c_j, what ones is to the sign plane.
+	exNibs []byte
+	exSum  []uint32
 	// ownCentroid: packing copied the centroid out of the borrowed bytes.
 	// Otherwise it is the caller's (UnmarshalRowsBorrowed), shared by every
 	// block of a cluster, and retained does not charge it per column.
@@ -166,7 +188,9 @@ func (c *Quantizer) PackFastScanFrame(rc []float32) {
 		return
 	}
 	d := b.width()
-	if len(rc) != d || fastGroups(d) == 0 {
+	// ponytail: ex columns have no global (8-bit, O(1) bind) path yet, so
+	// BindGlobal declines them; add per-plane <c_p, Rc> sums if binding cost shows.
+	if len(rc) != d || fastGroups(d) == 0 || b.ExBits > 0 {
 		c.PackFastScan()
 		return
 	}
@@ -252,7 +276,20 @@ func (b *Code) word(i int) uint64 {
 // word is word i of a packed column (words per row): its 16 nibbles,
 // reassembled. Cold paths only (marshal, Select, AppendRows); scoring
 // reads the nibbles.
-func (f *fastLayout) word(i, words int) uint64 {
+func (f *fastLayout) word(i, words int) uint64 { return nibWord(f.nibs, f.groups, i, words) }
+
+// exWord is word g of ex plane p of row.
+func (b *Code) exWord(row, p, g int) uint64 {
+	w := bitWords(b.width())
+	if b.Ex == nil {
+		f := b.fast
+		return nibWord(f.exNibs[p*len(f.nibs):], f.groups, row*w+g, w)
+	}
+	return b.Ex[(row*b.ExBits+p)*w+g]
+}
+
+// nibWord is fastLayout.word over any plane laid out as nibs.
+func nibWord(nibs []byte, groups, i, words int) uint64 {
 	r, w := i/words, i%words
 	k, j, shift := r/32, r%32, uint(0)
 	if j >= 16 {
@@ -261,10 +298,10 @@ func (f *fastLayout) word(i, words int) uint64 {
 	var x uint64
 	for n := range 16 {
 		g := w*16 + n
-		if g >= f.groups {
+		if g >= groups {
 			break
 		}
-		x |= uint64(f.nibs[(k*f.groups+g)*16+j]>>shift&0xF) << (4 * n)
+		x |= uint64(nibs[(k*groups+g)*16+j]>>shift&0xF) << (4 * n)
 	}
 	return x
 }
@@ -273,7 +310,7 @@ func (f *fastLayout) word(i, words int) uint64 {
 // metric decides whether the rows are normalized first; seed is the
 // rotation. An empty corpus still produces a valid, zero-row payload,
 // because a hood may legitimately hold only tombstones.
-func quantizeBits(vectors [][]float32, metric ivfq.Metric, rot *Rotation) (Quantizer, error) {
+func quantizeBits(vectors [][]float32, metric ivfq.Metric, rot *Rotation, exBits int) (Quantizer, error) {
 	dims, seed := rot.dims, rot.seed
 	if metric != ivfq.L2 && metric != ivfq.Cosine {
 		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", metric)
@@ -299,6 +336,7 @@ func quantizeBits(vectors [][]float32, metric ivfq.Metric, rot *Rotation) (Quant
 		Seed:     seed,
 		Unit:     unit,
 	}
+	b.allocEx(exBits, rows)
 	// The rows the centroid is the mean of, in the frame they are encoded
 	// in: unit vectors for cosine, the vectors themselves for l2. A zero
 	// vector has no unit form, so it is not a member of the mean and not a
@@ -343,6 +381,10 @@ func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 	words := make([]uint64, w*simd.FillBlock)     // words[g*simd.FillBlock+r]: sign word g of the block's row r
 	scale := math.Sqrt(float64(dims))
 	var rows [simd.FillBlock]int
+	var ex []float32
+	if b.ExBits > 0 {
+		ex = make([]float32, dims)
+	}
 	for start := 0; start < len(work); {
 		n := 0
 		for ; start < len(work) && n < simd.FillBlock; start++ {
@@ -382,8 +424,114 @@ func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 			// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = residual/norm.
 			align := absSums[r] / (norms[r] * scale)
 			b.Aligns[i] = float32(min(1, align))
+			if ex != nil {
+				for j := range ex {
+					ex[j] = block[j*simd.FillBlock+r]
+				}
+				b.fillEx(i, ex)
+			}
 		}
 	}
+}
+
+// maxExBits bounds Options.ExBits: past it a code's planes cost more than
+// the int8 codec's byte per dimension.
+const maxExBits = 6
+
+// allocEx sizes b's ex columns for rows at bits.
+func (b *Code) allocEx(bits, rows int) {
+	b.ExBits = bits
+	if bits == 0 {
+		return
+	}
+	b.Ex = make([]uint64, rows*bits*bitWords(len(b.Centroid)))
+	b.ExNorms = make([]float32, rows)
+	b.ExAligns = make([]float32, rows)
+}
+
+// fillEx encodes row i's rotated residual x (any scale; ex codes are
+// scale-free) as its ex planes, ExNorms and ExAligns. Ex is zero there.
+func (b *Code) fillEx(i int, x []float32) {
+	bits, w := b.ExBits, bitWords(len(x))
+	b.ExNorms[i], b.ExAligns[i] = exCode(x, bits, exScale(len(x), bits), b.Ex[i*bits*w:(i+1)*bits*w])
+}
+
+// exCode sets planes (bits planes of ceil(len(x)/64) words, zero) to x's
+// ex code at scale t: e_j = min(floor(t |x_j| / ||x||), 2^bits - 1), and
+// low_j = e_j when x_j >= 0 (the sign bit's test), 2^bits-1-e_j when not,
+// so c_j - (2^(bits+1)-1)/2 = ±(e_j + 1/2) = y_j. It returns ||y|| and
+// <y, x>/(||y|| ||x||); 0, 0 for a zero x.
+func exCode(x []float32, bits int, t float64, planes []uint64) (yNorm, align float32) {
+	w := bitWords(len(x))
+	var n2 float64
+	for _, v := range x {
+		n2 += float64(v) * float64(v)
+	}
+	if n2 == 0 {
+		return 0, 0
+	}
+	n := math.Sqrt(n2)
+	t /= n
+	top := 1<<bits - 1
+	var dot, y2 float64
+	for j, v := range x {
+		a := math.Abs(float64(v))
+		e := min(int(t*a), top)
+		low := e
+		if v < 0 {
+			low = top - e
+		}
+		for p := range bits {
+			planes[p*w+j/64] |= uint64(low>>p&1) << uint(j%64)
+		}
+		y := float64(e) + 0.5
+		dot += a * y
+		y2 += y * y
+	}
+	yn := math.Sqrt(y2)
+	return float32(yn), float32(min(1, dot/(n*yn)))
+}
+
+var exScales sync.Map // [2]int{dims, bits} -> float64
+
+// exScale is the one scale t every row's ex code at dims and bits is cut
+// at: the t that best aligns the codes of random Gaussian rows, which
+// rotated residuals resemble (the RaBitQ library's constant scaling), so
+// encoding is one pass a row instead of the paper's per-row search.
+// Memoized; deterministic, so writer and reader never disagree (and the
+// reader never needs it: t is not stored, only its codes).
+//
+// ponytail: a per-row optimal t (the paper's search) buys a little more
+// alignment for O(D 2^bits log D) a row; add it if recall asks.
+func exScale(dims, bits int) float64 {
+	key := [2]int{dims, bits}
+	if t, ok := exScales.Load(key); ok {
+		return t.(float64)
+	}
+	r := rand.New(rand.NewPCG(7, uint64(dims)<<8|uint64(bits)))
+	rows := make([][]float32, 64)
+	for i := range rows {
+		rows[i] = make([]float32, dims)
+		for j := range rows[i] {
+			rows[i][j] = float32(r.NormFloat64())
+		}
+	}
+	planes := make([]uint64, bits*bitWords(dims))
+	best, bestT := -1.0, 1.0
+	for k := 1; k <= 400; k++ {
+		t := float64(k) * float64(int(1)<<bits) * math.Sqrt(float64(dims)) / 400
+		var sum float64
+		for _, x := range rows {
+			clear(planes)
+			_, a := exCode(x, bits, t, planes)
+			sum += float64(a)
+		}
+		if sum > best {
+			best, bestT = sum, t
+		}
+	}
+	exScales.Store(key, bestT)
+	return bestT
 }
 
 // workRow keeps an L2 row and copies only when normalizing cosine. nil
@@ -442,6 +590,9 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = scratch/n.
 	align := absSum / (n * math.Sqrt(float64(dims)))
 	b.Aligns[i] = float32(min(1, align))
+	if b.ExBits > 0 {
+		b.fillEx(i, scratch)
+	}
 }
 
 func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
@@ -449,7 +600,8 @@ func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
 		return bytes.Clone(b.borrowed), nil
 	}
 	rows, w := b.Rows(), bitWords(dims)
-	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || b.fast == nil && len(b.Words) != rows*w) {
+	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || b.fast == nil && len(b.Words) != rows*w) ||
+		b.ExBits > 0 && (len(b.ExNorms) != rows || len(b.ExAligns) != rows || b.Ex != nil && len(b.Ex) != rows*b.ExBits*w) {
 		return nil, fmt.Errorf("quant: inconsistent 1-bit codes")
 	}
 	var out bytes.Buffer
@@ -463,7 +615,11 @@ func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
 	put16 := func(v uint16) { binary.LittleEndian.PutUint16(scratch[:2], v); out.Write(scratch[:2]) }
 	put32 := func(v uint32) { binary.LittleEndian.PutUint32(scratch[:4], v); out.Write(scratch[:4]) }
 	put64 := func(v uint64) { binary.LittleEndian.PutUint64(scratch[:8], v); out.Write(scratch[:8]) }
-	put16(bitsVersion)
+	if b.ExBits > 0 {
+		put16(exVersion)
+	} else {
+		put16(bitsVersion)
+	}
 	metric := byte(metricRaw)
 	if b.Unit {
 		metric = metricUnit
@@ -486,6 +642,22 @@ func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
 	}
 	for i := range rows * w {
 		put64(b.word(i))
+	}
+	if b.ExBits > 0 {
+		out.WriteByte(byte(b.ExBits))
+		for r := range rows {
+			for p := range b.ExBits {
+				for g := range w {
+					put64(b.exWord(r, p, g))
+				}
+			}
+		}
+		for _, x := range b.ExNorms {
+			put32(math.Float32bits(x))
+		}
+		for _, x := range b.ExAligns {
+			put32(math.Float32bits(x))
+		}
 	}
 	return out.Bytes(), nil
 }
@@ -511,8 +683,9 @@ func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Qua
 	if len(data) < bitsHeader || string(data[:4]) != magic {
 		return Quantizer{}, fmt.Errorf("quant: invalid 1-bit codes header")
 	}
-	if v := binary.LittleEndian.Uint16(data[4:]); v != bitsVersion {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes version %d, this reader speaks %d", v, bitsVersion)
+	version := binary.LittleEndian.Uint16(data[4:])
+	if version != bitsVersion && version != exVersion {
+		return Quantizer{}, fmt.Errorf("quant: 1-bit codes version %d, this reader speaks %d and %d", version, bitsVersion, exVersion)
 	}
 	metric, qbits := data[6], data[7]
 	if metric != metricRaw && metric != metricUnit {
@@ -534,12 +707,38 @@ func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Qua
 	}
 	w := bitWords(dims)
 	want := uint64(bitsHeader) + uint64(cOff) + 8*uint64(rows) + 8*uint64(rows)*uint64(w)
+	exBits := 0
+	if version == exVersion {
+		if want >= uint64(len(data)) {
+			return Quantizer{}, fmt.Errorf("quant: ex codes are %d bytes, no ex header", len(data))
+		}
+		exBits = int(data[want])
+		if exBits < 1 || exBits > maxExBits {
+			return Quantizer{}, fmt.Errorf("quant: ex codes of %d bits", exBits)
+		}
+		want += 1 + 8*uint64(rows)*uint64(exBits)*uint64(w) + 8*uint64(rows)
+	}
 	if want != uint64(len(data)) {
 		return Quantizer{}, fmt.Errorf("quant: 1-bit codes are %d bytes, a %dx%d part is %d", len(data), rows, dims, want)
 	}
-	b := &Code{Seed: seed, Unit: metric == metricUnit, rows: rows, dims: dims, cOff: cOff}
+	b := &Code{Seed: seed, Unit: metric == metricUnit, rows: rows, dims: dims, cOff: cOff, ExBits: exBits}
 	if !withCentroid {
 		b.Centroid = centroid
+	}
+	if exBits > 0 {
+		// ponytail: the ex part is decoded even for a borrowed column;
+		// alias it too if decode cost or memory shows.
+		off := bitsHeader + cOff + 8*rows + 8*rows*w + 1
+		b.Ex = make([]uint64, rows*exBits*w)
+		for i := range b.Ex {
+			b.Ex[i] = binary.LittleEndian.Uint64(data[off+8*i:])
+		}
+		off += 8 * len(b.Ex)
+		b.ExNorms, b.ExAligns = make([]float32, rows), make([]float32, rows)
+		for i := range rows {
+			b.ExNorms[i] = float32frombits(data[off+4*i:])
+			b.ExAligns[i] = float32frombits(data[off+4*rows+4*i:])
+		}
 	}
 	if borrow {
 		b.borrowed = data
@@ -598,11 +797,49 @@ func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Qua
 		if pad := uint(w*64 - dims); pad > 0 && b.word((i+1)*w-1)>>(64-pad) != 0 {
 			return Quantizer{}, fmt.Errorf("quant: row %d sets bits past dimension %d", i, dims)
 		}
+		if exBits > 0 {
+			if err := b.checkEx(i, n, w); err != nil {
+				return Quantizer{}, err
+			}
+		}
 	}
 	if !borrow {
 		b.rows, b.dims, b.cOff = 0, 0, 0 // owned Code keeps its historical shape
 	}
 	return Quantizer{Dims: dims, Code: b}, nil
+}
+
+// checkEx is decodeBits' check of row i's ex code (norm n): a row with a
+// residual has a positive finite ||y|| no smaller than a code of all
+// e_j = 0 (sqrt(D)/2) and an alignment in (0, 1]; one without, none and
+// no plane bits; and no plane sets bits past the last dimension.
+func (b *Code) checkEx(i int, n float32, w int) error {
+	yn, a := b.ExNorms[i], b.ExAligns[i]
+	if n == 0 {
+		if yn != 0 || a != 0 {
+			return fmt.Errorf("quant: row %d has no residual but an ex norm %v and alignment %v", i, yn, a)
+		}
+		for _, x := range b.Ex[i*b.ExBits*w : (i+1)*b.ExBits*w] {
+			if x != 0 {
+				return fmt.Errorf("quant: row %d has no residual but carries ex bits", i)
+			}
+		}
+		return nil
+	}
+	if !finiteNonnegative(yn) || float64(yn) < 0.4999*math.Sqrt(float64(b.width())) {
+		return fmt.Errorf("quant: row %d ex norm %v", i, yn)
+	}
+	if math.IsNaN(float64(a)) || a <= 0 || a > 1 {
+		return fmt.Errorf("quant: row %d ex alignment %v", i, a)
+	}
+	if pad := uint(w*64 - b.width()); pad > 0 {
+		for p := range b.ExBits {
+			if b.Ex[(i*b.ExBits+p+1)*w-1]>>(64-pad) != 0 {
+				return fmt.Errorf("quant: row %d sets ex bits past dimension %d", i, b.width())
+			}
+		}
+	}
+	return nil
 }
 
 // sameFrame reports whether o's rows were encoded exactly as b's: same
@@ -858,8 +1095,16 @@ func (s *bitScorer) rowIP(row int) float64 {
 	if s.g != nil {
 		return s.globalIP(row)
 	}
+	if s.b.ExBits > 0 {
+		return s.exRowIP(row)
+	}
+	return s.ipOf(s.signPop(row))
+}
+
+// signPop is the row's sign-plane popcount and weighted popcount
+// Σ_j b_j code_j.
+func (s *bitScorer) signPop(row int) (ones, weighted uint64) {
 	off := row * s.words
-	var ones, weighted uint64
 	switch b := s.b; {
 	case b.borrowed != nil:
 		ones, weighted = simd.BitProductBytes(b.borrowed[bitsHeader+b.cOff+8*b.rows+8*off:], s.planes, s.words)
@@ -867,15 +1112,9 @@ func (s *bitScorer) rowIP(row int) float64 {
 		ones, weighted = simd.BitProductWords(b.Words[off:off+s.words], s.planes)
 	default: // packed: Σ_j b_j code_j is the row's table entries summed
 		f := b.fast
-		k, i, shift := row/32, row%32, uint(0)
-		if i >= 16 {
-			i, shift = i-16, 4
-		}
 		ones = uint64(f.ones[row])
 		if len(s.lut) == 16*f.groups {
-			for g := range f.groups {
-				weighted += uint64(s.lut[16*g+int(f.nibs[(k*f.groups+g)*16+i]>>shift&0xF)])
-			}
+			weighted = s.nibSum(f.nibs, f.groups, row)
 		} else {
 			words := make([]uint64, s.words)
 			for w := range words {
@@ -884,7 +1123,51 @@ func (s *bitScorer) rowIP(row int) float64 {
 			ones, weighted = simd.BitProductWords(words, s.planes)
 		}
 	}
-	return s.ipOf(ones, weighted)
+	return ones, weighted
+}
+
+// nibSum is a packed row's table entries summed over a plane's nibs.
+func (s *bitScorer) nibSum(nibs []byte, groups, row int) (weighted uint64) {
+	k, i, shift := row/32, row%32, uint(0)
+	if i >= 16 {
+		i, shift = i-16, 4
+	}
+	for g := range groups {
+		weighted += uint64(s.lut[16*g+int(nibs[(k*groups+g)*16+i]>>shift&0xF)])
+	}
+	return weighted
+}
+
+// exRowIP is rowIP for an ex column: <ȳ, u~> from each plane's popcounts,
+// combined as integers, Σ_p 2^p (plane p's count), the sign plane p = B.
+func (s *bitScorer) exRowIP(row int) float64 {
+	b := s.b
+	ones, weighted := s.signPop(row)
+	ones, weighted = ones<<b.ExBits, weighted<<b.ExBits
+	for p := range b.ExBits {
+		var o, w uint64
+		if b.Ex != nil {
+			off := (row*b.ExBits + p) * s.words
+			o, w = simd.BitProductWords(b.Ex[off:off+s.words], s.planes)
+		} else { // packed, with the scorer's tables: Ex is gone only once packed
+			f := b.fast
+			plane := len(f.nibs)
+			o, w = 0, s.nibSum(f.exNibs[p*plane:(p+1)*plane], f.groups, row)
+		}
+		ones, weighted = ones+o<<p, weighted+w<<p
+	}
+	if b.Ex == nil {
+		ones = uint64(b.fast.exSum[row])
+	}
+	return s.exIPOf(ones, weighted, row)
+}
+
+// exIPOf is <ȳ, u~> from the row's Σ_j c_j (sum) and Σ_j c_j code_j
+// (weighted): <c, u~> less (2^(B+1)-1)/2 Σ_j u~_j, over ||y||.
+func (s *bitScorer) exIPOf(sum, weighted uint64, row int) float64 {
+	k := (float64(int(2)<<s.b.ExBits) - 1) / 2
+	acc := s.delta*float64(weighted) + s.low*float64(sum)
+	return (acc - k*(s.delta*s.sumQ+float64(s.dims)*s.low)) / float64(s.b.ExNorms[row])
 }
 
 // globalIP is rowIP for a global query: <x_b, Rq~> from the row's
@@ -935,6 +1218,11 @@ func (s *bitScorer) estimate(row int, known bool, rip float64, bound bool) (floa
 	align := float64(s.b.align(row))
 	if align == zeroRowAlign {
 		return 0, 0 // a zero vector's cosine is 0, exactly
+	}
+	if s.b.ExBits > 0 {
+		// The ex code's estimator is the 1-bit one with ȳ for x_b: the
+		// same bound, at the ex code's (higher) alignment.
+		align = float64(s.b.ExAligns[row])
 	}
 	norm := float64(s.b.norm(row))
 	dist2, slack := norm*norm+s.qNorm*s.qNorm, 0.0
@@ -1004,6 +1292,10 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 	if cap(s.sums) < 32*f.blocks {
 		s.sums = make([]uint16, 32*f.blocks)
 	}
+	if s.b.ExBits > 0 {
+		s.scoreAllEx(f, scores, bounds)
+		return
+	}
 	sums := s.sums[:32*f.blocks]
 	simd.FastScan(f.nibs, s.lut, f.groups, f.blocks, sums)
 	if bounds == nil {
@@ -1013,6 +1305,61 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 	for r := range rows {
 		ip := s.ipOf(uint64(f.ones[r]), uint64(sums[r]))
 		scores[r], bounds[r] = s.estimate(r, true, ip, true)
+	}
+}
+
+// scoreAllEx is scoreAll for a packed ex column: one scan per plane (the
+// sign plane, then each ex plane) through the query's one table, each
+// row's planes then combined as exRowIP does, in the same order.
+func (s *bitScorer) scoreAllEx(f *fastLayout, scores, bounds []float32) {
+	bits, n, plane := s.b.ExBits, 32*f.blocks, len(f.nibs)
+	if cap(s.sums) < (bits+1)*n {
+		s.sums = make([]uint16, (bits+1)*n)
+	}
+	sums := s.sums[:(bits+1)*n]
+	simd.FastScan(f.nibs, s.lut, f.groups, f.blocks, sums[:n])
+	for p := range bits {
+		simd.FastScan(f.exNibs[p*plane:(p+1)*plane], s.lut, f.groups, f.blocks, sums[(p+1)*n:(p+2)*n])
+	}
+	weighted := func(r int) uint64 {
+		w := uint64(sums[r]) << bits
+		for p := range bits {
+			w += uint64(sums[(p+1)*n+r]) << p
+		}
+		return w
+	}
+	if bounds != nil {
+		for r := range scores {
+			scores[r], bounds[r] = s.estimate(r, true, s.exIPOf(uint64(f.exSum[r]), weighted(r), r), true)
+		}
+		return
+	}
+	// estimate(r, true, exIPOf(exSum[r], weighted(r), r), false) inlined, the same
+	// operations in the same order (TestScoreAllMatchesRowByRow).
+	qn, lo, delta := s.qNorm, s.low, s.delta
+	q2 := qn * qn
+	kt := (float64(int(2)<<bits) - 1) / 2 * (s.delta*s.sumQ + float64(s.dims)*s.low)
+	norms, aligns, exNorms, exAligns := f.norms[:len(scores)], f.aligns[:len(scores)], s.b.ExNorms[:len(scores)], s.b.ExAligns[:len(scores)]
+	exSum := f.exSum[:len(scores)]
+	for r := range scores {
+		if aligns[r] == zeroRowAlign {
+			scores[r] = 0
+			continue
+		}
+		align, norm := float64(exAligns[r]), float64(norms[r])
+		dist2 := norm*norm + q2
+		if norm > 0 && qn > 0 && align > 0 {
+			acc := delta*float64(weighted(r)) + lo*float64(exSum[r])
+			ip := (acc - kt) / float64(exNorms[r]) / align
+			dist2 -= 2 * norm * qn * ip
+		}
+		gap := norm - qn
+		dist2 = max(dist2, gap*gap)
+		if s.l2 {
+			scores[r] = float32(-dist2)
+		} else {
+			scores[r] = float32(min(1, max(-1, 1-dist2/2)))
+		}
 	}
 }
 
@@ -1266,7 +1613,10 @@ func (b *Code) retained() int {
 	n := 0
 	if f := b.fast; f != nil {
 		n = len(f.nibs) + 2*len(f.ones) + 4*len(f.xbc) + 96 // norms and aligns: b.Norms, b.Aligns; rc is the caller's
+		n += len(f.exNibs) + 4*len(f.exSum)
 	}
+	// The ex code is always the column's own, borrowed or not.
+	n += 8*len(b.Ex) + 4*(len(b.ExNorms)+len(b.ExAligns))
 	if b.borrowed != nil {
 		return n // the probe entry already charges the raw column
 	}
