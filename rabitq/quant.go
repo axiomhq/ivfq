@@ -24,8 +24,8 @@ type Quantizer struct {
 func (c Quantizer) Rows() int { return c.Code.Rows() }
 
 // Retained is the bytes the column holds in memory of its own: zero for a
-// column UnmarshalBinaryBorrowed aliased onto its input, the payload's size
-// otherwise.
+// column UnmarshalBinaryBorrowed aliased onto its input (plus its ex code,
+// which is always decoded), the payload's size otherwise.
 func (c Quantizer) Retained() int { return c.Code.retained() }
 
 // Options is what Quantize needs beyond the vectors: the metric (cosine
@@ -34,6 +34,11 @@ func (c Quantizer) Retained() int { return c.Code.retained() }
 type Options struct {
 	Metric   ivfq.Metric
 	Rotation *Rotation
+	// ExBits is the extended RaBitQ code's bits per dimension past the
+	// sign bit (Code.ExBits), at most 6: 0 is the 1-bit code alone and
+	// its format; 2 is a 3-bit code at 3*dims/8 + 16 bytes a row, scored
+	// in full by its ex code (Scorer).
+	ExBits int
 }
 
 // Quantize encodes a hood's rows as 1-bit residuals to their own mean.
@@ -61,7 +66,7 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 			work[i] = workRow(v, true)
 		}
 	}
-	return Quantizer{Dims: dims, Code: quantize(len(work), dims, func(i int) []float32 { return work[i] }, unit, opts.Rotation)}, nil
+	return Quantizer{Dims: dims, Code: quantize(len(work), dims, func(i int) []float32 { return work[i] }, unit, opts.Rotation, opts.ExBits)}, nil
 }
 
 // quantize is Quantize over n rows read by work, each in the frame it is
@@ -70,7 +75,7 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 // not a member of the mean and not a row the estimator speaks for. work is
 // read twice per row, once for the mean and once to encode, and may reuse
 // one buffer.
-func quantize(n, dims int, work func(i int) []float32, unit bool, rot *Rotation) *Code {
+func quantize(n, dims int, work func(i int) []float32, unit bool, rot *Rotation, exBits int) *Code {
 	b := &Code{
 		Words:    make([]uint64, n*bitWords(dims)),
 		Centroid: make([]float32, dims),
@@ -79,6 +84,7 @@ func quantize(n, dims int, work func(i int) []float32, unit bool, rot *Rotation)
 		Seed:     rot.seed,
 		Unit:     unit,
 	}
+	b.allocEx(exBits, n)
 	sum := make([]float64, dims)
 	members := 0
 	for i := range n {
@@ -112,6 +118,8 @@ func checkFrame(opts Options) error {
 		return fmt.Errorf("rabitq: 1-bit codes need a positive width, got %d", rot.dims)
 	case rot.seed == 0:
 		return errors.New("rabitq: 1-bit codes need a nonzero rotation seed")
+	case opts.ExBits < 0 || opts.ExBits > maxExBits:
+		return fmt.Errorf("rabitq: %d ex bits, want 0 to %d", opts.ExBits, maxExBits)
 	case opts.Metric != ivfq.L2 && opts.Metric != ivfq.Cosine:
 		return fmt.Errorf("rabitq: metric %s has no 1-bit codec", opts.Metric)
 	}
@@ -138,7 +146,7 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 			c = normalized
 		}
 	}
-	return Quantizer{Dims: opts.Rotation.dims, Code: &Code{Centroid: c, Seed: opts.Rotation.seed, Unit: unit}}, nil
+	return Quantizer{Dims: opts.Rotation.dims, Code: &Code{Centroid: c, Seed: opts.Rotation.seed, Unit: unit, ExBits: opts.ExBits}}, nil
 }
 
 // Select returns a column holding only the rows at the given indexes, in
@@ -199,6 +207,17 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 		out.fillRow(rows+i, row, rot, scratch)
 	}
 	return Quantizer{Dims: dims, Code: out}, nil
+}
+
+// copyEx copies row r's ex code of b into row j of out.
+func (b *Code) copyEx(out *Code, j, r int) {
+	w := bitWords(b.width())
+	for p := range b.ExBits {
+		for g := range w {
+			out.Ex[(j*b.ExBits+p)*w+g] = b.exWord(r, p, g)
+		}
+	}
+	out.ExNorms[j], out.ExAligns[j] = b.ExNorms[r], b.ExAligns[r]
 }
 
 func (c Quantizer) MarshalBinary() ([]byte, error) {
