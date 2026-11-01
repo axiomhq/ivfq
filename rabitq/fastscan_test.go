@@ -17,11 +17,15 @@ func TestScoreAllMatchesRowByRow(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		for _, dims := range []int{7, 64, 100, 128, 130} {
 			for _, rows := range []int{0, 1, 31, 32, 33, 300} {
+				bits := rows % 3 // 0, 1, 1, 2, 0, 0: ex columns of every shape too
+				if dims == 130 {
+					bits = 2
+				}
 				v := corpus(rows, dims)
 				if rows > 5 {
 					v[5] = make([]float32, dims)
 				}
-				c, err := Quantize(v, Options{Metric: metric, Rotation: NewRotation(9, dims)})
+				c, err := Quantize(v, Options{Metric: metric, Rotation: NewRotation(9, dims), ExBits: bits})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -47,7 +51,7 @@ func TestScoreAllMatchesRowByRow(t *testing.T) {
 						}
 						for qi, q := range queries {
 							for _, exact := range []bool{false, true} {
-								name := fmt.Sprintf("%v/d%d/r%d/%s/packed=%v/q%d/exact=%v", metric, dims, rows, col.name, packed, qi, exact)
+								name := fmt.Sprintf("%v/d%d/r%d/ex%d/%s/packed=%v/q%d/exact=%v", metric, dims, rows, bits, col.name, packed, qi, exact)
 								pq := NewQuery(q, metric, rotOf(col.q))
 								pq.Exact = exact
 								checkScoreAll(t, name, col.q.Scorer(pq), rows)
@@ -105,30 +109,32 @@ func TestScoreAllAfterWith(t *testing.T) {
 
 func BenchmarkScoreAll(b *testing.B) {
 	v := corpus(256, 128)
-	c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: NewRotation(11, 128)})
-	if err != nil {
-		b.Fatal(err)
-	}
-	s := c.Scorer(NewQuery(v[0], ivfq.L2, rotOf(c)))
-	scores, bounds := make([]float32, 256), make([]float32, 256)
-	b.Run("rows", func(b *testing.B) {
-		for b.Loop() {
-			for r := range 256 {
-				scores[r] = s.Score(r)
+	for _, bits := range []int{0, 2} {
+		c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: NewRotation(11, 128), ExBits: bits})
+		if err != nil {
+			b.Fatal(err)
+		}
+		s := c.Scorer(NewQuery(v[0], ivfq.L2, rotOf(c)))
+		scores, bounds := make([]float32, 256), make([]float32, 256)
+		b.Run(fmt.Sprintf("ex%d/rows", bits), func(b *testing.B) {
+			for b.Loop() {
+				for r := range 256 {
+					scores[r] = s.Score(r)
+				}
 			}
-		}
-	})
-	c.PackFastScan()
-	b.Run("packed", func(b *testing.B) {
-		for b.Loop() {
-			s.ScoreAll(scores, nil)
-		}
-	})
-	b.Run("packed+bounds", func(b *testing.B) {
-		for b.Loop() {
-			s.ScoreAll(scores, bounds)
-		}
-	})
+		})
+		c.PackFastScan()
+		b.Run(fmt.Sprintf("ex%d/packed", bits), func(b *testing.B) {
+			for b.Loop() {
+				s.ScoreAll(scores, nil)
+			}
+		})
+		b.Run(fmt.Sprintf("ex%d/packed+bounds", bits), func(b *testing.B) {
+			for b.Loop() {
+				s.ScoreAll(scores, bounds)
+			}
+		})
+	}
 }
 
 // A scorer rebound with BindRotated scores as a fresh ScorerRotated, bit
