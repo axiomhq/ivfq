@@ -51,6 +51,10 @@ func (b *Code) pack(fr *frameSums) {
 	f := &fastLayout{groups: groups, blocks: (rows + 31) / 32, ones: make([]uint16, rows),
 		norms: make([]float32, rows), aligns: make([]float32, rows)}
 	f.nibs = make([]byte, f.blocks*groups*16)
+	if b.ExBits > 0 {
+		f.exNibs = make([]byte, b.ExBits*len(f.nibs))
+		f.exSum = make([]uint32, rows)
+	}
 	x := make([]uint64, 32*words)
 	for k := range f.blocks {
 		n := b.loadBlock(k, words, x)
@@ -64,6 +68,28 @@ func (b *Code) pack(fr *frameSums) {
 		}
 		if fr != nil {
 			fr.block(x, words, n, 32*k)
+		}
+		if b.ExBits > 0 {
+			for i := range n {
+				f.exSum[32*k+i] = uint32(f.ones[32*k+i]) << b.ExBits
+			}
+		}
+		for p := range b.ExBits {
+			clear(x)
+			for i := range n {
+				for g := range words {
+					x[i*words+g] = b.exWord(32*k+i, p, g)
+				}
+			}
+			plane := f.blocks * groups * 16
+			packNibbles(x, words, groups, f.exNibs[p*plane+k*groups*16:p*plane+(k+1)*groups*16])
+			for i := range n {
+				ones := 0
+				for _, w := range x[i*words : (i+1)*words] {
+					ones += bits.OnesCount64(w)
+				}
+				f.exSum[32*k+i] += uint32(ones) << p
+			}
 		}
 	}
 	if b.borrowed != nil {
@@ -87,7 +113,7 @@ func (b *Code) pack(fr *frameSums) {
 		b.Centroid, f.ownCentroid = c, true
 	}
 	b.Norms, b.Aligns = f.norms, f.aligns
-	b.Words, b.borrowed, b.cOff = nil, nil, 0
+	b.Words, b.Ex, b.borrowed, b.cOff = nil, nil, nil, 0
 	b.fast = f
 }
 
