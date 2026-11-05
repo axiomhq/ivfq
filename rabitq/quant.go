@@ -108,7 +108,9 @@ func checkFrame(opts Options) error {
 // Empty returns a column with no rows around centroid, in opts' frame:
 // what AppendRows grows one block at a time, so every block of a cluster
 // is encoded against the cluster's own centroid rather than the mean of
-// whichever rows happened to start the block.
+// whichever rows happened to start the block. A cosine column normalizes
+// the centroid, so keep the returned Code.Centroid, not the argument, for
+// UnmarshalRowsBorrowed.
 func Empty(centroid []float32, opts Options) (Quantizer, error) {
 	if err := checkFrame(opts); err != nil {
 		return Quantizer{}, err
@@ -201,10 +203,12 @@ func (c Quantizer) MarshalRows() ([]byte, error) {
 }
 
 // UnmarshalRowsBorrowed decodes MarshalRows output against centroid, the
-// one the rows were encoded against, validating it like
-// UnmarshalBinaryBorrowed and keeping the rows in data. The caller must
-// keep data and centroid immutable and alive; codes that share a centroid
-// slice are one frame (SameFrame) without comparing it.
+// one the rows were encoded against: the source column's Code.Centroid,
+// which for a cosine Empty column is normalized rather than Empty's
+// argument. It validates like UnmarshalBinaryBorrowed and keeps the rows in
+// data. The caller must keep data and centroid immutable and alive; codes
+// that share a centroid slice are one frame (SameFrame) without comparing
+// it.
 func UnmarshalRowsBorrowed(data []byte, centroid []float32) (Quantizer, error) {
 	return decodeBits(data, false, true, centroid)
 }
@@ -304,16 +308,24 @@ func (q Query) Global(rot *Rotation) Query {
 
 func NewQuery(q []float32, metric ivfq.Metric, rot *Rotation) Query {
 	out := Query{Vector: q, Metric: metric, Rotation: rot}
-	if metric == ivfq.Cosine {
-		var qn float64
-		for _, x := range q {
-			qn += float64(x) * float64(x)
-		}
-		if qn != 0 {
-			out.invNorm = 1 / math.Sqrt(qn)
-		}
-	}
+	out.norm()
 	return out
+}
+
+// norm sets invNorm for a cosine query. NewQuery calls it once; a Query
+// written as a literal gets it on each bind instead of scoring as a zero
+// vector, which would bound every row by 0 and prune the whole index.
+func (q *Query) norm() {
+	if q.Metric != ivfq.Cosine || q.invNorm != 0 {
+		return
+	}
+	var qn float64
+	for _, x := range q.Vector {
+		qn += float64(x) * float64(x)
+	}
+	if qn != 0 {
+		q.invNorm = 1 / math.Sqrt(qn)
+	}
 }
 
 // Scorer binds one column to one query: the per-hood work the paper's
@@ -337,6 +349,7 @@ func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q
 // lookup that probes hundreds of small clusters rotated its query
 // hundreds of times).
 func (q Query) Rotated(rot *Rotation) Query {
+	q.norm()
 	q.Rotation = rot
 	q.global = nil
 	if rot == nil || len(q.Vector) < rot.dims {
@@ -402,8 +415,14 @@ func (s *Scorer) BindGlobal(c *Quantizer, q Query) bool {
 
 // Use points s at c, a column in the frame s was bound in (SameFrame): a
 // cluster stored as many blocks encoded against one centroid binds the query
-// once per cluster rather than once per block.
-func (s *Scorer) Use(c *Quantizer) { s.bit.b = c.Code }
+// once per cluster rather than once per block. After BindGlobal, c must be
+// packed with PackFastScanFrame too, or Use panics.
+func (s *Scorer) Use(c *Quantizer) {
+	if s.bit.g != nil && (c.Code.fast == nil || c.Code.fast.xbc == nil) {
+		panic("rabitq: Use after BindGlobal needs a column packed with PackFastScanFrame")
+	}
+	s.bit.b = c.Code
+}
 
 // SameFrame reports whether o's rows were encoded exactly as c's.
 func (c *Quantizer) SameFrame(o *Quantizer) bool { return c.Code.sameFrame(o.Code) }

@@ -208,6 +208,17 @@ func TestBitCodesRejectImpossibleMetadata(t *testing.T) {
 			t.Fatalf("%s: borrowed decode accepted %d rows", name, got.Rows())
 		}
 	}
+	// A bare header whose dims wraps a 32-bit int (4*2^30 == 0) is still
+	// too short for its shape.
+	hdr := append([]byte(nil), b[:bitsHeader]...)
+	binary.LittleEndian.PutUint32(hdr[8:], 1<<30)
+	binary.LittleEndian.PutUint32(hdr[12:], 0)
+	if _, err := UnmarshalBinary(hdr); err == nil {
+		t.Fatal("decoded a 2^30-wide header with no centroid bytes")
+	}
+	if _, err := UnmarshalBinaryBorrowed(hdr); err == nil {
+		t.Fatal("borrowed decode accepted a 2^30-wide header with no centroid bytes")
+	}
 	// 64 dims is a full word, so there is no padding to corrupt; check the
 	// padding rule where there IS padding.
 	pb, err := mustEncode(t, corpus(4, 33), bitOpts(ivfq.L2, 33)).MarshalBinary()
@@ -401,6 +412,22 @@ func TestBitZeroRowsAndZeroQueries(t *testing.T) {
 	for row := range vectors {
 		if score, _ := zero.ScoreAndBound(row); score != 0 {
 			t.Fatalf("zero query scored row %d at %v", row, score)
+		}
+	}
+}
+
+// A cosine Query written as a literal scores as NewQuery's does, not as a
+// zero query whose bounds of 0 would prune every row.
+func TestLiteralCosineQueryScoresAsNewQuery(t *testing.T) {
+	vectors := corpus(8, 32)
+	codes := mustEncode(t, vectors, bitOpts(ivfq.Cosine, len(vectors[0])))
+	rot := rotOf(codes)
+	want := codes.Scorer(NewQuery(vectors[2], ivfq.Cosine, rot))
+	got := codes.Scorer(Query{Vector: vectors[2], Metric: ivfq.Cosine, Rotation: rot})
+	for row := range vectors {
+		ws, wb := want.ScoreAndBound(row)
+		if gs, gb := got.ScoreAndBound(row); gs != ws || gb != wb {
+			t.Fatalf("row %d: literal query %v/%v, NewQuery %v/%v", row, gs, gb, ws, wb)
 		}
 	}
 }

@@ -85,6 +85,13 @@ const boundSigmas = 2.5
 // Code is the 1-bit payload of a Quantizer. Rows are indexed in the order
 // the vectors were given to Quantize, which is the order a caller labels
 // scores with.
+//
+// Words, Centroid, Norms and Aligns hold the rows only for a column from
+// Quantize, Empty, AppendRows, Select or UnmarshalBinary. A borrowed column
+// keeps them in its bytes and leaves them empty until packed
+// (UnmarshalRowsBorrowed sets only Centroid), and PackFastScan, when it
+// packs, empties Words; Select copies the rows out of any column. Columns
+// share Centroid, so treat a Code as read-only once shared.
 type Code struct {
 	// Words is rows x ceil(dims/64) little-endian bit rows: bit j of row i
 	// is word[i*w + j/64] >> (j%64).
@@ -423,22 +430,27 @@ func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Qua
 	if qbits != queryBits {
 		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes want %d query bits, this reader has %d", qbits, queryBits)
 	}
-	dims, rows := int(binary.LittleEndian.Uint32(data[8:])), int(binary.LittleEndian.Uint32(data[12:]))
+	d32, r32 := binary.LittleEndian.Uint32(data[8:]), binary.LittleEndian.Uint32(data[12:])
+	dims, rows := int(d32), int(r32)
 	seed := binary.LittleEndian.Uint64(data[16:])
 	if dims <= 0 || rows < 0 || seed == 0 {
-		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes shape %dx%d seed %d", rows, dims, seed)
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes shape %dx%d seed %d", r32, d32, seed)
 	}
-	cOff := 0
-	if withCentroid {
-		cOff = 4 * dims
-	} else if len(centroid) != dims {
+	if !withCentroid && len(centroid) != dims {
 		return Quantizer{}, fmt.Errorf("rabitq: a %d-wide centroid for %d-wide codes", len(centroid), dims)
 	}
-	w := bitWords(dims)
-	want := uint64(bitsHeader) + uint64(cOff) + 8*uint64(rows) + 8*uint64(rows)*uint64(w)
-	if want != uint64(len(data)) {
-		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes are %d bytes, a %dx%d part is %d", len(data), rows, dims, want)
+	// The size is computed in uint64 from the header's fields: in int, a
+	// huge dims wraps on 32-bit and passes. Matching len(data) bounds every
+	// int offset below.
+	var cBytes uint64
+	if withCentroid {
+		cBytes = 4 * uint64(d32)
 	}
+	want := uint64(bitsHeader) + cBytes + 8*uint64(r32)*(1+(uint64(d32)+63)/64)
+	if want != uint64(len(data)) {
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes are %d bytes, a %dx%d part is %d", len(data), r32, d32, want)
+	}
+	cOff, w := int(cBytes), bitWords(dims)
 	// An owned decode copies the rows out first and validates the copy; a
 	// borrowed one validates in place.
 	in := Code{Seed: seed, Unit: metric == metricUnit, borrowed: data, rows: rows, dims: dims, cOff: cOff}
@@ -684,6 +696,7 @@ func (c *Quantizer) bindGlobal(s *bitScorer, q Query) {
 
 // bind sets s to q against c, reusing s's buffers.
 func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
+	q.norm()
 	b := c.Code
 	d := c.Dims
 	planes, lut, sums := s.planes, s.lut, s.sums
