@@ -11,13 +11,13 @@ import (
 func TestDotsI8MatchesGeneric(t *testing.T) {
 	// Every kernel the CPU has: the AVX-512 VNNI one, then AVX2 alone.
 	for _, vnni := range []bool{true, false} {
-		if vnni && !hasDotsI8VNNI {
+		if vnni && !hasVNNI {
 			continue
 		}
-		old := hasDotsI8VNNI
-		hasDotsI8VNNI = vnni
+		old := hasVNNI
+		hasVNNI = vnni
 		testDotsI8(t)
-		hasDotsI8VNNI = old
+		hasVNNI = old
 	}
 }
 

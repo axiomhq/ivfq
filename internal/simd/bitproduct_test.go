@@ -8,11 +8,8 @@ import (
 )
 
 // The dispatched kernels are bitProductGeneric, count for count, at every
-
 // width's tail, for a decoded row and for a row's bytes at every alignment
-
 // a borrowed column can put it at.
-
 func TestBitProductMatchesGeneric(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 1))
 	for words := 0; words <= 20; words++ {
@@ -58,9 +55,7 @@ func TestBitProductMatchesGeneric(t *testing.T) {
 }
 
 // BenchmarkBitProduct is one row's five popcounts: the dispatched kernel
-
 // against the generic loop, at the widths that matter.
-
 func BenchmarkBitProduct(b *testing.B) {
 	for _, dims := range []int{128, 768, 1536} {
 		words := (dims + 63) / 64

@@ -175,19 +175,19 @@ func TestQuantKernels(t *testing.T) {
 			}
 			codes, wcodes := make([]byte, dims), make([]byte, dims)
 			got := QuantCodes(codes, x, mul, lo, delta, 15)
-			hasFWHTOld := hasFWHT
-			hasFWHT = false
+			old := hasAVX2FMA
+			hasAVX2FMA = false
 			wgot := QuantCodes(wcodes, x, mul, lo, delta, 15)
-			hasFWHT = hasFWHTOld
+			hasAVX2FMA = old
 			if got != wgot || !slices.Equal(codes, wcodes) {
 				t.Fatalf("dims=%d mul=%v QuantCodes vector %v, reference %v", dims, mul, got, wgot)
 			}
 		}
 		sq := SumSq(x)
-		hasFWHTOld := hasFWHT
-		hasFWHT = false
+		old := hasAVX2FMA
+		hasAVX2FMA = false
 		wsq := SumSq(x)
-		hasFWHT = hasFWHTOld
+		hasAVX2FMA = old
 		if sq != wsq {
 			t.Fatalf("dims=%d SumSq %v, reference %v", dims, sq, wsq)
 		}

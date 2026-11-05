@@ -9,7 +9,21 @@ func DotF32I8(x []float32, b []byte) float32 {
 		return 0
 	}
 	_ = b[len(x)-1]
-	return dotF32I8(x, b)
+	switch {
+	case hasAVX512F:
+		return dotF32I8AVX512(&x[0], &b[0], len(x))
+	case hasAVX2FMA:
+		n := len(x) &^ 7
+		var s float32
+		if n > 0 {
+			s = dotF32I8AVX2(&x[0], &b[0], n)
+		}
+		for i := n; i < len(x); i++ {
+			s += x[i] * float32(int8(b[i]))
+		}
+		return s
+	}
+	return dotF32I8Generic(x, b)
 }
 
 func dotF32I8Generic(x []float32, b []byte) float32 {

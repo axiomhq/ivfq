@@ -22,7 +22,11 @@ func FastScan(nibs, lut []byte, groups, blocks int, out []uint16) {
 	if blocks == 0 {
 		return
 	}
-	fastScan(nibs, lut, groups, blocks, out)
+	if hasAVX2 {
+		fastScanAVX2(&nibs[0], &lut[0], groups/2, blocks, &out[0])
+		return
+	}
+	fastScanGeneric(nibs, lut, groups, blocks, out)
 }
 
 // FastScanMaxGroups bounds groups so a block's sums fit 16 bits with
@@ -58,5 +62,10 @@ func FastScan2(nibs, lutA, lutB []byte, groups, blocks int, outA, outB []uint16)
 	if blocks == 0 {
 		return
 	}
-	fastScan2(nibs, lutA, lutB, groups, blocks, outA, outB)
+	if hasAVX2 {
+		fastScan2AVX2(&nibs[0], &lutA[0], &lutB[0], groups/2, blocks, &outA[0], &outB[0])
+		return
+	}
+	fastScanGeneric(nibs, lutA, groups, blocks, outA)
+	fastScanGeneric(nibs, lutB, groups, blocks, outB)
 }

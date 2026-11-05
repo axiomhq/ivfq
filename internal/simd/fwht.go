@@ -15,7 +15,7 @@ const FillBlock = 16
 // must be a power of two. Dividing by sqrt(len(x)) makes it orthogonal.
 func FWHT(x []float32) {
 	n := len(x)
-	if n >= 8 && hasFWHT {
+	if n >= 8 && hasAVX2FMA {
 		fwht8(&x[0], n)
 		if n > 8 {
 			fwhtStages(&x[0], n, 8)
@@ -31,7 +31,7 @@ func FWHTRows(x []float32, n int) {
 	if len(x) != n*FillBlock {
 		panic("simd: FWHTRows block of the wrong size")
 	}
-	if n > 1 && hasFWHT {
+	if n > 1 && hasAVX2FMA {
 		fwhtStages(&x[0], n*FillBlock, FillBlock)
 		return
 	}
@@ -45,7 +45,7 @@ func PermScale(dst, src []float32, perm []int32, coef []float32) {
 	n := len(dst)
 	_, _, _ = perm[n-1], coef[n-1], src[n-1]
 	i := 0
-	if hasFWHT && n >= 4 {
+	if hasAVX2FMA && n >= 4 {
 		i = n &^ 3
 		permScale(&dst[0], &src[0], &perm[0], &coef[0], i)
 	}
@@ -60,7 +60,7 @@ func Scale(dst, src, coef []float32) {
 	n := len(dst)
 	_, _ = src[n-1], coef[n-1]
 	i := 0
-	if hasFWHT && n >= 8 {
+	if hasAVX2FMA && n >= 8 {
 		i = n &^ 7
 		scale(&dst[0], &src[0], &coef[0], i)
 	}
@@ -74,7 +74,7 @@ func Scale(dst, src, coef []float32) {
 func PermScaleRows(dst, src []float32, perm []int32, coef []float32) {
 	n := len(perm)
 	_, _, _ = dst[n*FillBlock-1], src[n*FillBlock-1], coef[n-1]
-	if hasFWHT && n > 0 {
+	if hasAVX2FMA && n > 0 {
 		permScaleRows(&dst[0], &src[0], &perm[0], &coef[0], n)
 		return
 	}

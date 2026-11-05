@@ -1,9 +1,9 @@
 // Package simd holds the numeric kernels every ivfq package scores with:
 // the float32 distances, the block dot product the centroid tree ranks
-// with, the 1-bit popcount products, the Givens rotation, and the int8
-// codec. Each has a pure Go reference; amd64 picks an AVX2 kernel at run
-// time when the CPU has it, and every kernel is pinned to its reference by
-// a test.
+// with, the 1-bit popcount products, the Walsh-Hadamard rotation and the
+// quantizers behind rabitq, and the int8 codec. Each has a pure Go
+// reference; amd64 picks an AVX2 or AVX-512 kernel at run time when the CPU
+// has it, and every kernel is pinned to its reference by a test.
 package simd
 
 import (
@@ -14,15 +14,17 @@ import (
 
 // Dot returns the inner product of a and b.
 func Dot(a, b []float32) float32 {
-	if hasF32AVX512 && len(a) > 0 && len(b) >= len(a) {
-		return dotAVX512(a, b)
+	if hasAVX512F && len(a) > 0 && len(b) >= len(a) {
+		var s float32
+		dotsF32AVX512(&a[0], &b[0], len(a), 1, &s)
+		return s
 	}
 	return floats.Float32Dot(a, b)
 }
 
 // L2Sq returns the squared euclidean distance between a and b.
 func L2Sq(a, b []float32) float32 {
-	if hasF32AVX512 && len(a) > 0 && len(b) >= len(a) {
+	if hasAVX512F && len(a) > 0 && len(b) >= len(a) {
 		return l2sqF32AVX512(&a[0], &b[0], len(a))
 	}
 	d := floats.Float32Distance(a, b)

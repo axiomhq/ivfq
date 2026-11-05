@@ -14,7 +14,7 @@ import "math"
 // block is dimension-major: block[j*FillBlock+r].
 func BlockSumSq(block []float32, dims int, sums *[FillBlock]float64) {
 	_ = block[dims*FillBlock-1]
-	if hasFWHT && dims > 0 {
+	if hasAVX2FMA && dims > 0 {
 		blockSumSq(&block[0], dims, &sums[0])
 		return
 	}
@@ -48,7 +48,7 @@ func BlockSignAbs(block []float32, dims int, abs *[FillBlock]float64, words []ui
 // blockBits32 is BlockSignAbs for n <= 32 dimensions: out[r] bit j is row r's
 // sign at dimension j.
 func blockBits32(block []float32, n int, abs *[FillBlock]float64, out *[FillBlock]uint32) {
-	if hasFWHT && n > 0 {
+	if hasAVX2FMA && n > 0 {
 		blockBits(&block[0], n, &abs[0], &out[0])
 		return
 	}
@@ -68,7 +68,7 @@ func blockBits32(block []float32, n int, abs *[FillBlock]float64, out *[FillBloc
 func MinMaxScaled(x []float32, mul float64) (lo, hi float64) {
 	lo, hi = math.Inf(1), math.Inf(-1)
 	i := 0
-	if hasFWHT && len(x) >= 4 {
+	if hasAVX2FMA && len(x) >= 4 {
 		i = len(x) &^ 3
 		lo, hi = minMaxScaled(&x[0], i, mul)
 	}
@@ -83,7 +83,7 @@ func MinMaxScaled(x []float32, mul float64) (lo, hi float64) {
 func SumSq(x []float32) float64 {
 	n4 := len(x) &^ 3
 	var s float64
-	if hasFWHT && n4 > 0 {
+	if hasAVX2FMA && n4 > 0 {
 		s = sumSq(&x[0], n4)
 	} else {
 		var l [4]float64
@@ -108,7 +108,7 @@ func QuantCodes(codes []byte, x []float32, mul, lo, delta float64, levels int) f
 	n4 := len(x) &^ 3
 	_ = codes[len(x)-1]
 	var s float64
-	if hasFWHT && n4 > 0 {
+	if hasAVX2FMA && n4 > 0 {
 		s = quantCodes(&codes[0], &x[0], n4, mul, lo, delta, float64(levels))
 	} else {
 		var l [4]float64

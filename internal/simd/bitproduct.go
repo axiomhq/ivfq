@@ -3,14 +3,30 @@ package simd
 import (
 	"encoding/binary"
 	"math/bits"
+	"unsafe"
 )
 
-// The 1-bit scan's inner product: for one row of sign bits and the query's
-// four bit planes (rowIP), ones is popcount(row) and weighted is
-// Σ_p 2^p popcount(row & plane_p). BitProductWords takes a decoded row,
-// BitProductBytes the row's bytes inside a borrowed DQB1 column; both
-// dispatch to the AVX2 kernel on amd64 and to bitProductGeneric elsewhere.
-// planes holds the four bit planes back to back, words words each.
+// BitProductWords is the 1-bit scan's inner product of a decoded row of
+// sign bits and the query's four bit planes (rowIP): ones is popcount(row)
+// and weighted is Σ_p 2^p popcount(row & plane_p). planes holds the four
+// planes back to back, len(row) words each.
+func BitProductWords(row, planes []uint64) (ones, weighted uint64) {
+	if hasAVX2POPCNT && len(row) > 0 {
+		return bitProductAVX2((*byte)(unsafe.Pointer(&row[0])), &planes[0], len(row))
+	}
+	return bitProductGeneric(row, planes)
+}
+
+// BitProductBytes is BitProductWords over the little-endian bytes of the
+// row's words inside a borrowed DQB1 column. The kernel reads them in place:
+// amd64 is little-endian and the kernel loads unaligned.
+func BitProductBytes(row []byte, planes []uint64, words int) (ones, weighted uint64) {
+	if hasAVX2POPCNT && words > 0 {
+		_ = row[:8*words]
+		return bitProductAVX2(&row[0], &planes[0], words)
+	}
+	return bitProductGenericBytes(row, planes, words)
+}
 
 // bitProductGeneric is the reference: five POPCNTs per word.
 func bitProductGeneric(row, planes []uint64) (ones, weighted uint64) {
