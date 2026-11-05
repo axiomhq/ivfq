@@ -46,6 +46,7 @@ func FuzzDecodeCentroids(f *testing.F) {
 		{[]byte{0, 0, 0, 0}, 2},                   // zero centroids
 		{[]byte{0xFF, 0xFF, 0xFF, 0xFF, 1, 2}, 2}, // allocation-bomb prefix
 		{[]byte{0xFF, 0xFF, 0xFF, 0x7F}, 1},       // huge count, no payload
+		{[]byte{0xFF, 0xFF, 0xFF, 0xFF}, 0},       // dims 0: a lying count would spin
 		{append(valid, 0xFF), 2},                  // trailing garbage
 		{valid, 1}, {valid, 16},                   // dims disagreement
 		{bytes.Repeat([]byte{0xFF}, 128), 4},
@@ -75,15 +76,6 @@ func FuzzDecodeCentroids(f *testing.F) {
 			}
 		}
 	})
-}
-
-// TestDecodeRejectsZeroDims: at dims == 0 every entry is zero-length, so a
-// lying count prefix would spin instead of dying on a truncated read.
-func TestDecodeRejectsZeroDims(t *testing.T) {
-	bomb := []byte{0xFF, 0xFF, 0xFF, 0xFF}
-	if _, err := DecodeCentroids(bomb, 0); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("DecodeCentroids at dims=0: %v", err)
-	}
 }
 
 func TestCentroidDeltaRoundTripAndApply(t *testing.T) {

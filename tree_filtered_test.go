@@ -1,6 +1,7 @@
 package ivfq
 
 import (
+	"cmp"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -21,12 +22,7 @@ func filteredExact(t Tree, q []float32, eligible []int, probe int) []int {
 		v := t.Leaf(id)
 		c = append(c, rankedNode{id, float32(float64(qq) + float64(Dot(v, v)) - 2*float64(Dot(q, v)))})
 	}
-	best := selectNearest(nil, c, probe)
-	out := make([]int, len(best))
-	for i, x := range best {
-		out[i] = x.id
-	}
-	return out
+	return idsOf(selectNearest(nil, c, probe))
 }
 
 func overlap(got, want []int) float64 {
@@ -131,24 +127,14 @@ func TestFilteredNearestLargeTreeBounded(t *testing.T) {
 			// beam, all of it far from the query.
 			byFar := slices.Clone(root.children)
 			slices.SortFunc(byFar, func(a, b int) int {
-				da, db := L2Sq(qs[0], tree.nodes[a].centroid), L2Sq(qs[0], tree.nodes[b].centroid)
-				switch {
-				case da > db:
-					return -1
-				case da < db:
-					return 1
-				}
-				return 0
+				return cmp.Compare(L2Sq(qs[0], tree.nodes[b].centroid), L2Sq(qs[0], tree.nodes[a].centroid))
 			})
 			var farMany []int
 			for _, c := range byFar[:min(30, len(byFar))] {
 				farMany = append(farMany, under(c)...)
 			}
 			// Asymmetric: 1% of the leaves anywhere, and every far leaf.
-			asym := slices.Clone(farMany)
-			for _, id := range r.Perm(leaves)[:leaves/100] {
-				asym = append(asym, id)
-			}
+			asym := append(slices.Clone(farMany), r.Perm(leaves)[:leaves/100]...)
 			filters := map[string][]int{
 				"far-clusters-many": farMany,
 				"asymmetric":        asym,

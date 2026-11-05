@@ -194,7 +194,7 @@ func meanIDs(v [][]float32, ids []int) []float32 {
 
 // Nearest returns up to probe leaf centroid indices, nearest first.
 func (t Tree) Nearest(q []float32, probe int) []int {
-	ids, _ := t.nearest(q, probe)
+	ids, _ := t.nearestBeam(q, probe, probe)
 	return ids
 }
 
@@ -203,20 +203,18 @@ func (t Tree) Evaluations(q []float32, probe int) ([]int, int) { return t.neares
 
 // EvaluationsBeam is Evaluations with the beam set apart from probe: the
 // search keeps beam nodes per level and ranks every leaf under them, so a
-// beam of probe scans every leaf once probe exceeds the root's fanout (all
-// 5,464 at 1M rows in hoods of 256, for 96 probes). Leaves are ranked
-// exactly; a narrower beam can only miss a leaf under a node it dropped.
-// beam below probe is raised to... nothing: it may be smaller than probe,
-// and the result is still the probe nearest leaves the beam reached.
+// beam of probe scans every leaf once probe exceeds the root's fanout.
+// Leaves are ranked exactly; a narrower beam can only miss a leaf under a
+// node it dropped. beam may be smaller than probe, and the result is still
+// the probe nearest leaves the beam reached.
 func (t Tree) EvaluationsBeam(q []float32, beam, probe int) ([]int, int) {
 	return t.nearestBeam(q, beam, probe)
 }
 
 // Searcher is Nearest, Assign and TwoStageAssign with scratch that
-// survives between calls: a warm Searcher allocates nothing per query. It
-// belongs to one goroutine; a bulk caller makes one per worker. Nearest
-// allocates its candidate buffer per call, about 45 KB per row when a
-// re-route runs every member of a cluster through it.
+// survives between calls: a warm Searcher allocates nothing per query,
+// where Tree.Nearest allocates its result. It belongs to one goroutine; a
+// bulk caller makes one per worker.
 type Searcher struct {
 	t   *Tree
 	w   treeWorkspace
@@ -254,13 +252,11 @@ func (s *Searcher) Assign(q []float32, beam int) int {
 // child of the root, then a distance for every leaf under the top
 // subtrees. It is TwoStageNearest(q, top)[0], or -1.
 //
-// Measured, it is a wash for bulk routing: on real BIGANN rows the stage-two
-// scan is the whole cost and the beam's pruning wins on large trees, so the
-// maintainer's router keeps the beam. Small trees are where this wins: at
-// k = 977 a top-4 two-stage reached 99.1% agreement at 2.5x less wall per
-// row than beam 16, because the stage-one fan there is 10 wide and four
-// subtrees cover nearly the whole set. Choose by the benchmark, not by the
-// evaluation count.
+// On large trees the stage-two scan is the whole cost and Assign's beam
+// pruning wins. Small trees are where this wins: with a narrow root fan a
+// few subtrees cover nearly the whole set (at k = 977, a top-4 two-stage
+// reached 99.1% agreement at 2.5x less wall per row on BIGANN). Choose by measured
+// wall time, not by the evaluation count.
 func (s *Searcher) TwoStageAssign(q []float32, top int) int {
 	best, _ := s.t.twoStageInto(&s.w, q, top, 1)
 	if len(best) == 0 {
@@ -282,9 +278,9 @@ type treeWorkspace struct {
 	out8  []rankedNode
 }
 
-// dots returns q's dot product with each of the first n rows of block,
-// dims wide (Dots: Dot per row, bit for bit, one call per
-// node instead of one per centroid), in scratch the next call reuses.
+// dotsOf returns q's dot product with each of the first n rows of block,
+// len(q) wide (Dots: Dot per row, bit for bit, one call per node instead
+// of one per centroid), in scratch the next call reuses.
 func (w *treeWorkspace) dotsOf(q, block []float32, n int) []float32 {
 	if cap(w.dots) < n {
 		w.dots = make([]float32, n)
@@ -294,8 +290,6 @@ func (w *treeWorkspace) dotsOf(q, block []float32, n int) []float32 {
 	return w.dots
 }
 
-func (t Tree) nearest(q []float32, probe int) ([]int, int) { return t.nearestBeam(q, probe, probe) }
-
 func (t Tree) nearestBeam(q []float32, beam, probe int) ([]int, int) {
 	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
 		return nil, 0
@@ -303,16 +297,12 @@ func (t Tree) nearestBeam(q []float32, beam, probe int) ([]int, int) {
 	w := workspaces.Get().(*treeWorkspace)
 	defer workspaces.Put(w)
 	best, evals := t.nearestInto(w, q, beam, probe)
-	out := make([]int, len(best))
-	for i, x := range best {
-		out[i] = x.id
-	}
-	return out, evals
+	return idsOf(best), evals
 }
 
-// workspaces lends nearest its scratch: a query's leaf scan collects a
+// workspaces lends nearestBeam its scratch: a query's leaf scan collects a
 // candidate per scanned leaf, every leaf at a wide beam, and growing that
-// afresh per query was most of a 5,464-leaf search's cost in copies and GC.
+// afresh per query was most of a wide search's cost in copies and GC.
 var workspaces = sync.Pool{New: func() any { return new(treeWorkspace) }}
 
 func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]rankedNode, int) {
@@ -321,18 +311,9 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 	}
 	qq := Dot(q, q)
 	evals := t.beamHolders(w, q, qq, beam)
-	// Squared distances use the norm identity, sharing q's norm across
-	// each block. The terms combine in float64 so near ties retain their
-	// low bits on long vectors.
-	scan := func(n *treeNode, ids []int) {
-		dots := w.dotsOf(q, n.block, len(ids))
-		for j, id := range ids {
-			d := float64(qq) + float64(n.norms[j]) - 2*float64(dots[j])
-			w.next = append(w.next, rankedNode{id, float32(d)})
-		}
-		evals += len(ids)
-	}
 	if count == 1 {
+		// One leaf wanted: keep the running best instead of buffering a
+		// candidate per scanned leaf.
 		var best rankedNode
 		have := false
 		for _, id := range w.holders {
@@ -356,7 +337,8 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 	w.next = w.next[:0]
 	for _, id := range w.holders {
 		n := &t.nodes[id]
-		scan(n, n.leaves)
+		scanRank(w, n, n.leaves, qq, q)
+		evals += len(n.leaves)
 	}
 	w.best = selectNearest(w.best[:0], w.next, count)
 	return w.best, evals
@@ -372,11 +354,7 @@ func (t Tree) TwoStageNearest(q []float32, top int) ([]int, int) {
 	var w treeWorkspace
 	w.next = make([]rankedNode, 0, min(t.fanout, len(t.nodes)))
 	best, evals := t.twoStageInto(&w, q, top, top)
-	out := make([]int, len(best))
-	for i, x := range best {
-		out[i] = x.id
-	}
-	return out, evals
+	return idsOf(best), evals
 }
 
 // twoStageInto runs the two-stage search into w: stage one ranks the root's
@@ -394,28 +372,26 @@ func (t Tree) twoStageInto(w *treeWorkspace, q []float32, top, count int) ([]ran
 	if len(root.children) == 0 {
 		// A single-holder tree has no fan to rank: the holder is the one
 		// bucket and stage two scans all of it.
-		scanRank(t.dims, w, root, root.leaves, qq, q)
+		scanRank(w, root, root.leaves, qq, q)
 		evals += len(root.leaves)
 	} else {
-		scanRank(t.dims, w, root, root.children, qq, q)
+		scanRank(w, root, root.children, qq, q)
 		evals += len(root.children)
-		// The picks stay in w.best so the workspace retains their buffer's
-		// capacity between rows: assigning the stage-one result to a local
-		// alone left w.best at stage two's count-sized cap, and stage one
-		// re-grew it on every row.
+		// The picks stay in w.best so the workspace keeps their buffer's
+		// capacity between rows instead of re-growing it on every row.
 		picks := selectNearest(w.best[:0], w.next, top)
 		w.best = picks
 		w.next = w.next[:0]
 		for _, p := range picks {
 			n := &t.nodes[p.id]
 			if len(n.children) == 0 {
-				scanRank(t.dims, w, n, n.leaves, qq, q)
+				scanRank(w, n, n.leaves, qq, q)
 				evals += len(n.leaves)
 				continue
 			}
 			for _, h := range n.sub {
 				hn := &t.nodes[h]
-				scanRank(t.dims, w, hn, hn.leaves, qq, q)
+				scanRank(w, hn, hn.leaves, qq, q)
 				evals += len(hn.leaves)
 			}
 		}
@@ -424,12 +400,11 @@ func (t Tree) twoStageInto(w *treeWorkspace, q []float32, top, count int) ([]ran
 	return w.best, evals
 }
 
-// scanRank is nearestInto's inner scan, factored out for the two-stage
-// search: squared distances over a node's block by the norm identity, one
-// dot product per candidate, float64 accumulation for near-tied ordering.
-// nearestInto keeps its inline closure; this copy only reads the same
-// fields.
-func scanRank(dims int, w *treeWorkspace, n *treeNode, ids []int, qq float32, q []float32) {
+// scanRank appends to w.next the squared distance from q to each of ids,
+// the rows of n's block, by the norm identity: q's norm is shared across
+// the block and there is one dot product per candidate. The terms combine
+// in float64 so near ties keep their low bits on long vectors.
+func scanRank(w *treeWorkspace, n *treeNode, ids []int, qq float32, q []float32) {
 	dots := w.dotsOf(q, n.block, len(ids))
 	for j, id := range ids {
 		d := float64(qq) + float64(n.norms[j]) - 2*float64(dots[j])
@@ -446,8 +421,7 @@ func scanRank(dims int, w *treeWorkspace, n *treeNode, ids []int, qq float32, q 
 // It keeps a max-heap of the probe best, its root the worst kept, so a
 // candidate costs one comparison unless it enters: O(n log probe). The
 // sorted buffer insertNearest keeps is O(n * probe) when most candidates
-// enter, as at a default query's beam — 547 of 5,464 leaves at 1M rows in
-// hoods of 256 took 1.7 ms a query.
+// enter, as at a default query's wide leaf scan.
 func selectNearest(best, cands []rankedNode, probe int) []rankedNode {
 	best = best[:0]
 	if probe <= 0 {
@@ -485,15 +459,7 @@ func selectNearest(best, cands []rankedNode, probe int) []rankedNode {
 			i = w
 		}
 	}
-	slices.SortFunc(best, func(a, b rankedNode) int {
-		switch {
-		case a.before(b):
-			return -1
-		case b.before(a):
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(best, rankedNode.compare)
 	return best
 }
 
@@ -521,6 +487,26 @@ func (a rankedNode) before(b rankedNode) bool {
 	return a.d < b.d || a.d == b.d && a.id < b.id
 }
 
+// compare is before as a slices.SortFunc comparison.
+func (a rankedNode) compare(b rankedNode) int {
+	switch {
+	case a.before(b):
+		return -1
+	case b.before(a):
+		return 1
+	}
+	return 0
+}
+
+// idsOf returns the ids of ranked, in order.
+func idsOf(ranked []rankedNode) []int {
+	ids := make([]int, len(ranked))
+	for i, x := range ranked {
+		ids[i] = x.id
+	}
+	return ids
+}
+
 type rankedNode struct {
 	id int
 	d  float32
@@ -543,9 +529,7 @@ func (t Tree) Leaf(id int) []float32 { return t.leaves[id] }
 func (t Tree) MarshalBinary() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteString("DVT\x01")
-	for _, x := range []uint32{uint32(t.dims), uint32(t.fanout), uint32(t.root + 1), uint32(t.height), uint32(len(t.leaves)), uint32(len(t.nodes))} {
-		binary.Write(&b, binary.LittleEndian, x)
-	}
+	binary.Write(&b, binary.LittleEndian, []uint32{uint32(t.dims), uint32(t.fanout), uint32(t.root + 1), uint32(t.height), uint32(len(t.leaves)), uint32(len(t.nodes))})
 	for _, v := range t.leaves {
 		if len(v) != t.dims {
 			return nil, errors.New("ivf: mixed dimensions")
@@ -580,11 +564,7 @@ func UnmarshalTree(data []byte) (Tree, error) {
 	}
 	r := bytes.NewReader(data[4:])
 	var h [6]uint32
-	for i := range h {
-		if binary.Read(r, binary.LittleEndian, &h[i]) != nil {
-			return Tree{}, errors.New("ivf: truncated tree")
-		}
-	}
+	binary.Read(r, binary.LittleEndian, &h) // cannot fail: the length check covers the header
 	dims, nLeaves, nNodes := uint64(h[0]), uint64(h[4]), uint64(h[5])
 	rem := uint64(r.Len())
 	// Minimum footprint, independent of dims (zero-dimensional vectors are
@@ -809,11 +789,17 @@ func (t *Tree) attach(h, id int, v []float32) {
 	n := &t.nodes[h]
 	n.leaves = append(slices.Clone(n.leaves), id)
 	n.norms = append(slices.Clone(n.norms), Dot(v, v))
+	t.extendBlock(n, v)
+}
+
+// extendBlock gives holder n a fresh block, its old block then v, and
+// points n's leaves at it. Holder blocks are sub-slices of one arena, so
+// growing one in place would trample its neighbour.
+func (t *Tree) extendBlock(n *treeNode, v []float32) {
 	blk := make([]float32, 0, len(n.block)+len(v))
-	blk = append(append(blk, n.block...), v...)
-	n.block = blk
+	n.block = append(append(blk, n.block...), v...)
 	for k, lid := range n.leaves {
-		t.leaves[lid] = blk[k*t.dims : (k+1)*t.dims : (k+1)*t.dims]
+		t.leaves[lid] = n.block[k*t.dims : (k+1)*t.dims : (k+1)*t.dims]
 	}
 }
 
@@ -833,18 +819,10 @@ func (t *Tree) appendLeaf(v []float32) {
 		return
 	}
 	n := &t.nodes[t.nearestHolder(v)]
-	old := n.block
-	id := len(t.leaves)
-	n.leaves = append(n.leaves, id)
+	n.leaves = append(n.leaves, len(t.leaves))
 	n.norms = append(n.norms, Dot(v, v))
-	blk := make([]float32, 0, len(old)+len(v))
-	blk = append(blk, old...)
-	blk = append(blk, v...)
-	n.block = blk
-	for j, lid := range n.leaves[:len(n.leaves)-1] {
-		t.leaves[lid] = blk[j*len(v) : (j+1)*len(v) : (j+1)*len(v)]
-	}
-	t.leaves = append(t.leaves, blk[len(old):len(old)+len(v):len(old)+len(v)])
+	t.leaves = append(t.leaves, nil)
+	t.extendBlock(n, v)
 }
 
 // nearestHolder descends the hierarchy the way nearestInto does — same

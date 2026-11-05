@@ -139,11 +139,7 @@ func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWo
 	if out == nil {
 		return nil, work
 	}
-	ids := make([]int, len(out))
-	for i, x := range out {
-		ids[i] = x.id
-	}
-	return ids, work
+	return idsOf(out), work
 }
 
 // holdersQuantized reports whether every holder in holders has its int8

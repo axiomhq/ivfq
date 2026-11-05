@@ -16,42 +16,9 @@ func TestDefaultPolicyPinned(t *testing.T) {
 	}
 }
 
-// TestNoPolicyTriggerSeesTheWholeIndex is the interface-level statement of
-
-// what this package gave up on 2026-09-05: every trigger past Bootstrap takes
-
-// []ClusterStat and nothing else. There is no argument through which a policy
-
-// could learn N, and therefore no way for one to ask for a pass over N. The
-
-// drift trigger that used to (ReclusterK, taking an IndexStats of additive
-
-// and live totals) is gone; an explicit recluster is the only verb that still
-
-// rebuilds an index on request.
-
-//
-
-// This is a compile-time property, so the test is a compile-time assertion:
-
-// the Policy interface is satisfied by a type whose only per-index input is a
-
-// cluster slice. If a whole-index trigger is ever added back, this stops
-
-// building and whoever added it has to read the paragraph above.
-
-func TestNoPolicyTriggerSeesTheWholeIndex(t *testing.T) {
-	var _ Policy = clusterOnlyPolicy{}
-}
-
-type clusterOnlyPolicy struct{ DefaultPolicy }
-
 // pad makes n filler hoods of the given size, so a table case can state a
-
 // realistic total (and therefore a realistic per-hood target) without
-
 // spelling out sixteen clusters.
-
 func pad(n, count int) []ClusterStat {
 	out := make([]ClusterStat, n)
 	for i := range out {
@@ -69,12 +36,8 @@ func padRadius(in []ClusterStat, r float64) []ClusterStat {
 	return in
 }
 
-// TestSplitTargetRatioBoundary pins SplitTarget's ratio-gate boundary (T1
-
-// review minor c, optional): count exactly equal to splitFactor×mean must
-
-// NOT split (strict >); one more must.
-
+// TestSplitTarget pins the radius trigger, including its boundary: a radius
+// exactly splitRadiusFactor x the mean must NOT split (strict >).
 func TestSplitTarget(t *testing.T) {
 	p := DefaultPolicy{}
 	tests := []struct {
@@ -106,18 +69,10 @@ func TestSplitTarget(t *testing.T) {
 	}
 }
 
-// TestSplitClusterRejectsUnknownTarget: a policy returning a split id that
-// names no real cluster must surface as a CompactNow error (the caller
-// already log-and-retries — see startCompactor), never a panic.
-
 // TestDefaultNprobeCurve pins the whole default across five orders of
-
 // magnitude, because it is three rules interacting (a constant budget, a
-
 // k/32 recall floor, a k/4 ceiling) and the interesting values are the
-
 // crossovers, not any one rule.
-
 func TestDefaultNprobeCurve(t *testing.T) {
 	for _, tc := range []struct{ total, k, want int }{
 		{64, 8, 8},                   // small-N floor stays exact
@@ -147,13 +102,9 @@ func TestDefaultNprobeCurve(t *testing.T) {
 }
 
 // TestHoodKIsFixedSize pins the sizing rule that replaced round(sqrt(N)):
-
 // hood COUNT carries the growth, hood SIZE does not. The first block is the
-
 // compatibility claim (existing namespaces and every small test get the k
-
 // they got before), the second is the scaling claim.
-
 func TestHoodKIsFixedSize(t *testing.T) {
 	// Below hoodFloor x HoodTarget the floor is min(hoodFloor, RoundSqrt),
 	// which IS RoundSqrt while RoundSqrt <= hoodFloor — so k is unchanged
@@ -185,18 +136,13 @@ func TestHoodKIsFixedSize(t *testing.T) {
 }
 
 // TestSplitAndMergeBracketTheTarget: the two triggers that KEEP hoods near
-
 // the target once the bootstrap has placed them. Split fires strictly above
-
 // SplitAbove (1.4x target) and merge at or below target/4, so a hood inside
-
 // [target/4, SplitAbove] is left alone by both — which is the band
-
 // an end-to-end churn test asserts on a whole index.
-
 func TestSplitAndMergeBracketTheTarget(t *testing.T) {
 	const total = 1_000_000
-	target := HoodSize(total) // 1024
+	target := HoodSize(total) // 195
 	stats := make([]ClusterStat, HoodK(total))
 	for i := range stats {
 		stats[i] = ClusterStat{ID: i, Count: target, Radius: 1}
@@ -227,28 +173,13 @@ func TestSplitAndMergeBracketTheTarget(t *testing.T) {
 	}
 }
 
-// never sees more than SampleSize(k) vectors however big the corpus is, and
-
-// every vector still gets assigned in the pass that follows. Without this
-
-// bound, fixed-size hoods (k = N/HoodTarget) would make the build O(N^2/S)
-
-// per iteration and be strictly worse than the sqrt-sized index it replaces.
-
 // TestSplitTargetSkipsUnsplittableHood: a hood whose members are all the same
-
 // point has Radius 0 and CANNOT be split — 2-means over identical vectors
-
-// puts everything in one cluster and leaves the other empty, dropEmptyHoods
-
-// reclaims the empty one, and the size trigger fires again on the next cycle.
-
-// That is one wasted structural verb per compaction, forever. The size
-
+// puts everything in one cluster and leaves the other empty, reclaim drops
+// the empty one, and the size trigger fires again on the next cycle. That
+// is one wasted split per cycle, forever. The size
 // trigger therefore skips it however far past the target it is; the ordinary
-
 // fat-and-spread hood beside it is the one that goes.
-
 func TestSplitTargetSkipsUnsplittableHood(t *testing.T) {
 	const total = 1_000_000
 	target := HoodSize(total)
@@ -267,17 +198,11 @@ func TestSplitTargetSkipsUnsplittableHood(t *testing.T) {
 }
 
 // TestMergeTargetKeepsTheHostUnderTheSplitTrigger pins the merge's
-
 // hysteresis: a tiny cluster whose nearest neighbour would pass the split
-
 // trigger with its rows is not merged (the next cycle would split the host
-
 // again, and the layout would alternate split and merge forever); the next
-
 // smallest tiny with room goes instead, and a tiny with room merges into
-
 // its nearest neighbour.
-
 func TestMergeTargetKeepsTheHostUnderTheSplitTrigger(t *testing.T) {
 	// Slots: 0 a tiny beside a full sibling (1), 2 a tiny beside a
 	// roomy cluster (3), and filler far away.

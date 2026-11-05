@@ -14,13 +14,13 @@ const (
 	splitRadiusFactor = 2
 	MergeMax          = 3
 
-	// HoodTarget is the vectors-per-neighborhood the sizing rule aims at.
-	// It is the ONE constant that makes a query's cost constant in N: three
-	// things are proportional to it and they pull opposite ways — candidates
-	// scored per query is nprobe x HoodTarget, pack bytes per hood is
-	// HoodTarget x dims x 4 (512 KiB at 128 dims, one object read's worth
-	// and the unit a cache evicts), and the centroid set both the query and
-	// the build must scan is N/HoodTarget.
+	// HoodTarget is the vectors-per-neighborhood the sizing rule aims at,
+	// the one constant that keeps hood size constant in N. Three things are
+	// proportional to it and they pull opposite ways: candidates scored per
+	// query is nprobe x HoodTarget, pack bytes per hood is HoodTarget x dims
+	// x 4 (98 KiB at 128 dims: one object read and the unit a cache
+	// evicts), and the centroid set both the query and the build must scan
+	// is N/HoodTarget.
 	//
 	// The sizing rule aims at 196 rows, a soft target with headroom under
 	// MaxHoodRows: a hood born at the hard cap splits again at its first
@@ -37,25 +37,30 @@ const (
 	// 0.968, so the default is the old default, made constant in N.
 	CandidateBudget = 100_000
 
-	// budgetNprobe is the hood count CandidateBudget buys: a constant, and
-	// the whole cost of a default query up to about a million vectors.
+	// budgetNprobe is the hood count CandidateBudget buys (511): a constant,
+	// and the whole cost of a default query from about 400,000 to about
+	// 3.2M vectors, where neither of DefaultNprobe's other bounds binds.
 	budgetNprobe = (CandidateBudget + HoodTarget - 1) / HoodTarget
 
 	// recallProbeDiv is the OTHER half of the default, and it exists because
 	// a constant candidate budget does not hold recall and no sizing rule can
-	// make it. Measured at 10M: the budget's 98 hoods return
-	// recall@10 of 0.502, and reaching 0.93 takes 512. Flat IVF recall tracks
-	// the FRACTION of the corpus scanned; fixed-size hoods improve the
-	// constant in front of that — markedly — but do not change the law.
+	// make it. Measured at 10M, a 100,000-candidate budget returned
+	// recall@10 of 0.502, and reaching 0.93 took five times as many. Flat
+	// IVF recall tracks the FRACTION of the corpus scanned; fixed-size hoods
+	// improve the constant in front of that, markedly, but do not change the
+	// law.
 	//
 	// So the default probes at least k/32. That makes a default query's cost
 	// grow with N again, which is the price of a default that holds recall.
-	// k/16 was the first value, set on the synthetic blob corpus before
-	// the hoods carried 1-bit codes and an exact rerank. Measured on BIGANN
-	// 10M with them:
-	// k/16 = 634 probes recall@10 1.000 at p50 79 ms, k/32 = 317 probes
-	// 0.997 at 49 ms, k/64 = 158 probes 0.990 at 31 ms. The default takes
-	// the middle row; the recall controller can still raise it.
+	// Measured on BIGANN 10M at k = 10,150, with 1-bit codes and an exact
+	// rerank:
+	//
+	//	k/16 = 634 probes  recall@10 1.000 at p50 79 ms
+	//	k/32 = 317 probes  recall@10 0.997 at p50 49 ms
+	//	k/64 = 158 probes  recall@10 0.990 at p50 31 ms
+	//
+	// The default takes the middle row; the recall controller can still
+	// raise it.
 	recallProbeDiv = 32
 
 	// probeCeilDiv and minProbeCeil cap the default at a quarter of the
@@ -81,7 +86,8 @@ const (
 // DefaultNprobe is how many hoods a query probes when the caller does not
 // name a number and no recall controller has tuned the index. It is also
 // where package recall's controller starts and what its ceiling is a
-// multiple of, so it is a starting point rather than the last word. Two bounds, and the smaller wins:
+// multiple of, so it is a starting point rather than the last word. Two
+// bounds, and the smaller wins:
 //
 //	max(budgetNprobe, k/32)  the FLOOR: a constant candidate budget, raised
 //	                         to a fixed fraction of the index once that is
@@ -91,24 +97,22 @@ const (
 //	                         the hoods by default once there are enough of
 //	                         them to matter.
 //
-// The ceiling exists because the budget alone made the default an EXACT scan
-// just below its own size: a 100,000-vector index has 98 hoods and the budget
-// asks for 98, so the default read every one — 4.42 ms measured, for recall
-// the index did not need. The quarter it now reads there is 24 hoods:
-// recall@10 1.000 at 1.12 ms, 24,641 candidates against 100,000.
-// Above ~400,000 vectors the ceiling is never the binding bound and 1M and 10M
-// are untouched. Below 64 hoods it floors at 16, which is at or above k for
-// every index the bootstrap threshold allows, so a small index still
-// probes everything and answers exactly.
+// The ceiling exists because the budget alone makes the default an EXACT
+// scan just below its own size: a 100,000-vector index has 511 hoods and
+// the budget asks for 511, so the default would read every one, for recall
+// the index does not need. The ceiling reads 127 there. Above ~400,000
+// vectors the ceiling is never the binding bound. Below 64 hoods it floors
+// at 16, so an index of up to 16 hoods (3,136 vectors) still probes
+// everything and answers exactly.
 func DefaultNprobe(k int) int {
 	return max(1, min(max(budgetNprobe, k/recallProbeDiv), max(minProbeCeil, k/probeCeilDiv)))
 }
 
 // HoodK is the sizing rule: k = ceil(total / HoodTarget), so hood size is
-// constant in N and hood COUNT carries the growth. It replaces
-// round(sqrt(total)), under which both count and size grew as sqrt(N) and
-// candidates per query therefore grew linearly in N. Identical to the old rule for total <= 256; larger for
-// everything above, by design.
+// constant in N and hood COUNT carries the growth. Under round(sqrt(total))
+// both count and size grow as sqrt(N), and candidates per query therefore
+// grow linearly in N. The two rules agree up to 272 vectors; HoodK is
+// no larger up to HoodTarget² (38,416) and larger above it, by design.
 func HoodK(total int) int {
 	if total < 1 {
 		return 1
@@ -134,15 +138,15 @@ func HoodSize(total int) int {
 // It is stated here rather than inlined at the trigger because a rewrite
 // that leaves a hood above this may split it inside the rewrite, the way
 // SPFresh's LIRE splits a posting inside the insert that overflowed it,
-// and both readers of the rule have to agree on the same number. 1,432 at
-// a million vectors.
+// and both readers of the rule have to agree on the same number. 273 at a
+// million vectors.
 func SplitAbove(total int) int {
 	return HoodSize(total) * splitSizeNum / splitSizeDen
 }
 
 // MergeBelow is the hood size under which a hood is a wasted probe slot and
-// should be absorbed by its nearest neighbor. Never below MergeMax, so the
-// pre-existing "singleton hoods merge" behavior survives at any size.
+// should be absorbed by its nearest neighbor. Never below MergeMax, so
+// singleton hoods merge at any size.
 func MergeBelow(total int) int {
 	return max(MergeMax, HoodSize(total)/mergeSizeDiv)
 }
@@ -194,6 +198,8 @@ type ClusterStat struct {
 // a test can substitute a stub that names a split unconditionally.
 // SplitTarget answers with one hood, chosen by size and then by radius.
 type DefaultPolicy struct{}
+
+var _ Policy = DefaultPolicy{}
 
 // MaxHoodRows opts this policy into a hard publication cap (MaxHoodRows).
 // Engines without capacity enforcement may still temporarily exceed it.
@@ -252,7 +258,9 @@ func (DefaultPolicy) SplitTarget(clusters []ClusterStat) (int, bool) {
 	return 0, false
 }
 
-// RoundSqrt is the k heuristic: about √N neighborhoods of about √N vectors.
+// RoundSqrt is round(√total), the k rule HoodK replaced: about √N
+// neighborhoods of about √N vectors. HoodK keeps it as its small-index
+// floor.
 func RoundSqrt(total int) int {
 	return int(math.Round(math.Sqrt(float64(total))))
 }

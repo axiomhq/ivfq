@@ -66,11 +66,7 @@ func (t Tree) FilteredNearest(q []float32, eligible []int, beam, probe int) ([]i
 	if len(out) == 0 {
 		return nil, work
 	}
-	ids := make([]int, len(out))
-	for i, x := range out {
-		ids[i] = x.id
-	}
-	return ids, work
+	return idsOf(out), work
 }
 
 // filterWorkspace is a filtered search's scratch: the tree workspace the
@@ -167,15 +163,7 @@ func (t Tree) filteredHolders(w *filterWorkspace, q []float32, beam, want int) i
 		if len(tw.next) == 0 {
 			break
 		}
-		slices.SortFunc(tw.next, func(a, b rankedNode) int {
-			switch {
-			case a.before(b):
-				return -1
-			case b.before(a):
-				return 1
-			}
-			return 0
-		})
+		slices.SortFunc(tw.next, rankedNode.compare)
 		tw.active = tw.active[:0]
 		acc := reached
 		for i, x := range tw.next {

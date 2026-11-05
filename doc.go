@@ -6,6 +6,18 @@
 // deltas. It also holds the distance vocabulary every subpackage shares:
 // Metric, Score, Dot, L2Sq and CosineSim.
 //
+// The sizing rule is the package's central claim: k = HoodK(N) =
+// ceil(N/HoodTarget), so clusters hold about HoodTarget vectors whatever N
+// is and cluster COUNT carries the growth. A default query probes
+// DefaultNprobe(k) clusters, which is not constant in N and cannot be: flat
+// IVF recall tracks the fraction of the corpus scanned, and no sizing
+// changes that. What fixed-size clusters buy is a better index at whatever
+// budget is chosen, and a far cheaper build, because kmeans fits them on a
+// sample. After the build nothing here asks for a pass over N: Policy and
+// MergeTargets are stated entirely on []ClusterStat, the per-cluster counts
+// and radii an index already holds, and rebuilding an index is a caller's
+// explicit decision.
+//
 // The other halves are subpackages: kmeans fits the centroids, rabitq
 // gives every cluster a 1-bit candidate column with a scorer and an error
 // bound, rank selects and fuses hits, late scores multi-vector documents,
