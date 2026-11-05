@@ -18,6 +18,7 @@ clusters, the codes and the scan.
 | `late` | late-interaction scoring of multi-vector documents |
 | `sparse` | the string-keyed sparse vector |
 | `codec` | f16 and int8 row storage |
+| `vector` | `Slice`: flat float32, f16, int8 or uint8 rows, read as `[][]float32` |
 | `bench` | Big ANN corpus readers and recall@k |
 
 No I/O anywhere but `bench`.
