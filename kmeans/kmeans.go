@@ -284,11 +284,10 @@ func costWith(d2 []float32, vecs [][]float32, c []float32) float64 {
 		}
 		return sum
 	}
-	workers := min(runtime.GOMAXPROCS(0), n)
-	if workers < 2 || n < parallelMin {
+	if n < parallelMin {
 		return chunkSum(0, n)
 	}
-	const chunk = 4096
+	const chunk = 4096 // the summation order, whatever the worker count
 	parts := make([]float64, (n+chunk-1)/chunk)
 	forChunks(n, chunk, func(lo, hi int) { parts[lo/chunk] = chunkSum(lo, hi) })
 	var sum float64

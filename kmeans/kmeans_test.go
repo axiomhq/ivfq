@@ -141,6 +141,20 @@ func TestWorkerCountInvariant(t *testing.T) {
 	if !reflect.DeepEqual(c1, c2) || !reflect.DeepEqual(a1, a2) {
 		t.Fatal("assignment fan-out changed the result: 1 worker and 16 disagree")
 	}
+	// k-means++ seeding's cost sum above parallelMin rows: one worker used
+	// to add every row into one accumulator, several added 4,096-row parts.
+	rng := rand.New(rand.NewSource(11))
+	big, d2 := make([][]float32, 70_000), make([]float32, 70_000)
+	for i := range big {
+		big[i] = []float32{rng.Float32() * 1000, rng.Float32() * 1000}
+		d2[i] = rng.Float32() * 1e6
+	}
+	runtime.GOMAXPROCS(1)
+	one := costWith(d2, big, big[0])
+	runtime.GOMAXPROCS(16)
+	if many := costWith(d2, big, big[0]); one != many {
+		t.Fatalf("seeding cost %v on 1 worker, %v on 16", one, many)
+	}
 }
 
 // TestRunCancelled: a cancelled context returns its error and no result,
