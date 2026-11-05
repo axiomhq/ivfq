@@ -10,21 +10,21 @@ const rrfK = 60
 // Fusion configures reciprocal rank fusion. The zero value is the standard
 // RRF: rank constant 60, every leg weighted 1.
 type Fusion struct {
-	RankConstant int       `json:"rank_constant,omitempty"` // <= 0 means 60
+	RankConstant int       `json:"rank_constant,omitempty"` // 0 means 60; negative is invalid
 	Weights      []float64 `json:"weights,omitempty"`       // one per leg, > 0; nil means all 1
 }
 
 // Validate checks f against the number of legs it will fuse.
 func (f Fusion) Validate(legs int) error {
 	if f.RankConstant < 0 {
-		return errors.New("rank_constant must be positive")
+		return errors.New("rank: rank_constant must not be negative")
 	}
 	if f.Weights != nil && len(f.Weights) != legs {
-		return errors.New("weights must name one weight per query")
+		return errors.New("rank: weights must name one weight per leg")
 	}
 	for _, w := range f.Weights {
 		if !(w > 0) {
-			return errors.New("weights must be positive")
+			return errors.New("rank: weights must be positive")
 		}
 	}
 	return nil
@@ -59,9 +59,6 @@ func (f Fusion) RRF(k int, legs ...[]Hit) []Hit {
 			seen[h.ID] = true
 			fused[h.ID] += w / float64(c+rank+1)
 		}
-	}
-	if len(fused) == 0 {
-		return nil
 	}
 	out := make([]Hit, 0, len(fused))
 	for id, s := range fused {

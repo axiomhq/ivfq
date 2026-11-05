@@ -1,6 +1,8 @@
 package rank
 
 import (
+	"cmp"
+	"math"
 	"math/rand"
 	"slices"
 	"sort"
@@ -25,8 +27,8 @@ func sortedTopK(hits []Hit, k int) []Hit {
 	}
 	out := append([]Hit(nil), hits...)
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score != out[j].Score {
-			return out[i].Score > out[j].Score
+		if c := cmp.Compare(out[i].Score, out[j].Score); c != 0 {
+			return c > 0 // cmp.Compare puts NaN below every number
 		}
 		return out[i].ID < out[j].ID
 	})
@@ -45,7 +47,11 @@ func TestTopKMatchesSortedReference(t *testing.T) {
 			// Few distinct scores and few distinct ids on purpose: ties on
 			// score (broken by id ascending) and outright duplicates are what
 			// a bounded heap gets wrong, and at these widths they are certain.
+			// NaN must not tie with every score.
 			hits[i] = Hit{ID: string(rune('a' + rng.Intn(12))), Score: float32(rng.Intn(8))}
+			if rng.Intn(6) == 0 {
+				hits[i].Score = float32(math.NaN())
+			}
 		}
 		for _, k := range []int{0, 1, n - 1, n, n + 5, -3} {
 			got, want := Select(append([]Hit(nil), hits...), k), sortedTopK(hits, k)
@@ -53,7 +59,7 @@ func TestTopKMatchesSortedReference(t *testing.T) {
 				t.Fatalf("trial %d k=%d: len %d, want %d\n got %+v\nwant %+v", trial, k, len(got), len(want), got, want)
 			}
 			for i := range want {
-				if got[i] != want[i] {
+				if got[i].ID != want[i].ID || math.Float32bits(got[i].Score) != math.Float32bits(want[i].Score) {
 					t.Fatalf("trial %d k=%d: hit %d = %+v, want %+v\n got %+v\nwant %+v", trial, k, i, got[i], want[i], got, want)
 				}
 			}
@@ -69,11 +75,9 @@ func BenchmarkTopK(b *testing.B) {
 	for i := range hits {
 		hits[i] = Hit{ID: strconv.Itoa(i), Score: rng.Float32()}
 	}
-	scratch := make([]Hit, len(hits))
 	b.ReportAllocs()
 	for b.Loop() {
-		copy(scratch, hits) // Select may reorder its input; every iteration gets the same one
-		Select(scratch, 10)
+		Select(hits, 10)
 	}
 }
 

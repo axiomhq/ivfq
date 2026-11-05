@@ -71,7 +71,7 @@ per-cluster counts and radii. No rule ever touches every row.
 
 ## Rank
 
-`rank` orders hits by score descending, ties by id ascending.
+`rank` orders hits by score descending, NaN last, ties by id ascending.
 
 1. Select the top k as you score: `sel := rank.NewTopK(k)`, `sel.Push(id, score)` per candidate, then `sel.Hits()`. `rank.Select(hits, k)` does the same for a slice.
 2. Fuse ranked legs: `rank.RRF(k, legs...)`, or `rank.Fusion{RankConstant: c, Weights: w}.RRF(k, legs...)` after `Validate(len(legs))`.

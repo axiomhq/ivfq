@@ -12,17 +12,14 @@ type Hit struct {
 	Score float32 `json:"score"`
 }
 
-// Select returns the k best hits — score desc, ties by ID asc for determinism —
-// which is what a full sort followed by a truncation returns, at O(C log k)
-// instead of O(C log C). k <= 0 yields no hits, so a negative caller k can
-// never panic.
+// Select returns the k best hits — score desc, NaN last, ties by ID asc for
+// determinism — which is what a full sort followed by a truncation returns,
+// at O(C log k) instead of O(C log C). k <= 0 yields nil, so a negative
+// caller k can never panic.
 //
 // At 10M rows the full sort was 51% of a warm query's wall time: 1,002,530
 // candidates sorted, through a reflect swapper and a closure, to return 10.
 func Select(hits []Hit, k int) []Hit {
-	if k <= 0 {
-		return hits[:0] // no hits, in the input's own shape (TestRRF pins the empty slice)
-	}
 	sel := NewTopK(k)
 	for _, h := range hits {
 		sel.Push(h.ID, h.Score)
@@ -37,14 +34,14 @@ func Select(hits []Hit, k int) []Hit {
 //
 // It keeps a k-sized min-heap under the INVERSE of the result order, so the
 // root is the weakest hit kept and a candidate that cannot make the cut costs
-// exactly one comparison. Zero value is unusable; call NewTopK.
+// exactly one comparison. The zero value selects nothing, like NewTopK(0).
 type TopK struct {
 	k int
 	h hitHeap
 }
 
 // NewTopK returns a selector for the k best hits. k <= 0 accepts pushes and
-// returns nothing, matching Select's guard.
+// returns nothing.
 func NewTopK(k int) *TopK { return &TopK{k: k} }
 
 // Push offers one scored candidate. Order of pushes does not affect the
@@ -71,8 +68,8 @@ func (t *TopK) Cutoff() (Hit, bool) {
 	return t.h[0], true
 }
 
-// Hits returns a copy of the selected hits in result order: score desc, ties by ID asc.
-// Nothing selected yields nil, exactly as a truncating sort would. The sort
+// Hits returns a copy of the selected hits in result order: score desc, NaN
+// last, ties by ID asc. Nothing selected yields nil. The sort
 // here is over at most k elements, not over the candidates.
 func (t *TopK) Hits() []Hit {
 	out := slices.Clone([]Hit(t.h))
@@ -81,11 +78,20 @@ func (t *TopK) Hits() []Hit {
 }
 
 // worse is the result order inverted: a is worse than b when it sorts AFTER b
-// — lower score, or the same score and a bigger id. One predicate for the
-// heap and for the final k-element sort, so the two cannot drift.
+// — lower score, NaN below every number, or the same score and a bigger id.
+// One predicate for the heap and for the final k-element sort, so the two
+// cannot drift. NaN needs its own rank: compared as a number it ties with
+// everything, the order stops being one, and a NaN at the heap root keeps
+// every later candidate out.
 func worse(a, b Hit) bool {
-	if a.Score != b.Score {
-		return a.Score < b.Score
+	if a.Score < b.Score {
+		return true
+	}
+	if a.Score > b.Score {
+		return false
+	}
+	if an, bn := a.Score != a.Score, b.Score != b.Score; an != bn {
+		return an
 	}
 	return a.ID > b.ID
 }

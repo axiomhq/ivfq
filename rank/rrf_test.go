@@ -76,7 +76,7 @@ func TestRRF(t *testing.T) {
 			name: "negative k yields no hits",
 			legs: [][]Hit{vec},
 			k:    -1,
-			want: []Hit{},
+			want: nil,
 		},
 	}
 	for _, tc := range cases {
