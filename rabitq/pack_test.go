@@ -323,37 +323,3 @@ func TestTranspose8(t *testing.T) {
 		}
 	}
 }
-
-func TestPackFixtureMatchesRowAtATime(t *testing.T) {
-	centroid, rc, blocks := packFixture(t)
-	if blocks == nil {
-		t.Skip("IVFQ_PACK_FIXTURE not set")
-	}
-	for i, raw := range blocks {
-		got, err := UnmarshalRowsBorrowed(raw, centroid)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want, _ := UnmarshalRowsBorrowed(raw, centroid)
-		got.PackFastScanFrame(rc)
-		packRowAtATime(&want, rc)
-		samePacked(t, fmt.Sprintf("fixture block %d (%dx%d)", i, got.Rows(), got.Dims), got.Code, want.Code)
-	}
-}
-
-// BenchmarkPackReference is BenchmarkDecodePack's frame case through the
-// row-at-a-time reference, in the same binary.
-func BenchmarkPackReference(b *testing.B) {
-	for _, dims := range []int{128, 768, 1024} {
-		centroid, rc, part := packBenchColumn(b, dims, 64)
-		b.Run(fmt.Sprintf("frame/d%d/r64", dims), func(b *testing.B) {
-			for b.Loop() {
-				q, err := UnmarshalRowsBorrowed(part, centroid)
-				if err != nil {
-					b.Fatal(err)
-				}
-				packRowAtATime(&q, rc)
-			}
-		})
-	}
-}

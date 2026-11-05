@@ -11,8 +11,7 @@ import (
 )
 
 // The 1-bit candidate codec: RaBitQ (Gao & Long, SIGMOD 2024,
-// arXiv:2405.12497), the "1-bit codes, 16-32x compression" of
-// the current generation of ANN indexes.
+// arXiv:2405.12497).
 //
 // One row of a hood is:
 //
@@ -41,8 +40,9 @@ import (
 // rather than bounded worst-case; see bitScorer) and reports eps0 sigmas as
 // the bound. THE BOUND IS PROBABILISTIC: unlike the int8 codec's triangle
 // inequality it can be exceeded, so "exact within the probed hoods" becomes
-// a recall guarantee at boundConfidence. Query.Exact turns it off (every row
-// survives the bound pass) for callers that want the certainty back.
+// a recall guarantee at the confidence boundSigmas names. Query.Exact turns
+// it off (every row survives the bound pass) for callers that want the
+// certainty back.
 const (
 	bitsMagic = "DQB1"
 	// rowsMagic is a DQB1 part without its centroid (Quantizer.MarshalRows):
@@ -60,7 +60,7 @@ const (
 	zeroRowAlign = -1
 )
 
-// newBitScorer sets the four planes unrolled: compile only at four bits.
+// bind sets the four planes unrolled: compile only at four bits.
 var _ [queryBits - 4]struct{}
 var _ [4 - queryBits]struct{}
 
@@ -190,14 +190,13 @@ func (c *Quantizer) PackFastScanFrame(rc []float32) {
 // PackFastScan lays the column's rows out for Scorer.ScoreAll's batched
 // scan, which then scores 32 rows per table lookup instead of a row at a
 // time: about 1 ns a row against 28 for the popcount product alone, at
-// 128 dimensions. The packed rows replace the column's bits: it stops
-// aliasing a borrowed input (UnmarshalBinaryBorrowed, UnmarshalRowsBorrowed)
-// and holds about what it did, so a cache of columns holds as many. Kept
-// beside the bits, they cost as much memory again, and at 10M rows in a
-// 1 GiB cache that tripled a warm query (753 loads a query against 37).
-// Every method still works on a packed column. It writes the column, so
-// call it before the column is shared; packing twice is a no-op, and a
-// column too wide for the scan stays unpacked (pack.go).
+// 128 dimensions. The packed rows replace the column's bits rather than
+// sitting beside them, so a packed column holds about what it did and a
+// cache of columns holds as many; it stops aliasing a borrowed input
+// (UnmarshalBinaryBorrowed, UnmarshalRowsBorrowed). Every method still
+// works on a packed column. It writes the column, so call it before the
+// column is shared; packing twice is a no-op, and a column too wide for the
+// scan stays unpacked (pack.go).
 func (c *Quantizer) PackFastScan() { c.Code.pack(nil) }
 
 func bitWords(dims int) int { return (dims + 63) / 64 }
@@ -269,72 +268,21 @@ func (f *fastLayout) word(i, words int) uint64 {
 	return x
 }
 
-// quantizeBits encodes vectors as 1-bit residuals to their own mean.
-// metric decides whether the rows are normalized first; seed is the
-// rotation. An empty corpus still produces a valid, zero-row payload,
-// because a hood may legitimately hold only tombstones.
-func quantizeBits(vectors [][]float32, metric ivfq.Metric, rot *Rotation) (Quantizer, error) {
-	dims, seed := rot.dims, rot.seed
-	if metric != ivfq.L2 && metric != ivfq.Cosine {
-		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", metric)
-	}
-	if dims <= 0 {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes need a positive width, got %d", dims)
-	}
-	if seed == 0 {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes need a nonzero rotation seed")
-	}
-	for i, v := range vectors {
-		if len(v) != dims {
-			return Quantizer{}, fmt.Errorf("quant: row %d is %d-wide, the field is %d", i, len(v), dims)
-		}
-	}
-	unit := metric == ivfq.Cosine
-	rows := len(vectors)
-	b := &Code{
-		Words:    make([]uint64, rows*bitWords(dims)),
-		Centroid: make([]float32, dims),
-		Norms:    make([]float32, rows),
-		Aligns:   make([]float32, rows),
-		Seed:     seed,
-		Unit:     unit,
-	}
-	// The rows the centroid is the mean of, in the frame they are encoded
-	// in: unit vectors for cosine, the vectors themselves for l2. A zero
-	// vector has no unit form, so it is not a member of the mean and not a
-	// row the estimator speaks for.
-	work := make([][]float32, rows)
-	sum := make([]float64, dims)
-	members := 0
-	for i, v := range vectors {
-		row := workRow(v, unit)
-		if row == nil {
-			b.Aligns[i] = zeroRowAlign
-			continue
-		}
-		work[i] = row
-		for j, x := range row {
-			sum[j] += float64(x)
-		}
-		members++
-	}
-	if members > 0 {
-		for j := range b.Centroid {
-			b.Centroid[j] = float32(sum[j] / float64(members))
-		}
-	}
-	b.fillRows(work, rot)
-	return Quantizer{Dims: dims, Code: b}, nil
-}
-
-// fillRows is fillRow over every non-nil row of work, simd.FillBlock rows at a
-// time: the residuals are laid out dimension-major, so each butterfly pair
-// is loaded once per block and rotates a contiguous run of simd.FillBlock
-// values instead of two scattered ones per row, and the per-row float64
-// sums (the norm, the alignment's |x|) run as simd.FillBlock independent chains
-// instead of one latency-bound chain per row. Every value goes through the
-// same float32 operations in the same order as Rotation.Apply, and every
-// row's sum adds its terms in the same order as fillRow, so the codes are
+// fillRows encodes every non-nil row of work into the row of b at its
+// index: the stored norm ||o - c||, the rotated residual's sign bits, and
+// the alignment. A norm of 0 (the row IS the centroid, or is within a
+// float32 ulp of it) stores no bits and an alignment of 0, the
+// no-norm-no-alignment agreement the reader checks; the test is on the
+// STORED norm, because that is what the reader sees.
+//
+// It runs simd.FillBlock rows at a time: the residuals are laid out
+// dimension-major, so each butterfly pair is loaded once per block and
+// rotates a contiguous run of simd.FillBlock values instead of two
+// scattered ones per row, and the per-row float64 sums (the norm, the
+// alignment's |x|) run as simd.FillBlock independent chains instead of one
+// latency-bound chain per row. Every value goes through the same float32
+// operations in the same order as Rotation.Apply, and every row's sum adds
+// its terms in the same order as a row at a time would, so the codes are
 // bit-identical to fillRow's (TestFillRowsMatchesFillRow).
 func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 	dims := len(b.Centroid)
@@ -365,8 +313,8 @@ func (b *Code) fillRows(work [][]float32, rot *Rotation) {
 		rot.applyBlock(block) // rows past n are stale and ignored
 		// Sign bits and |x| sums in vector registers, one row per lane: a
 		// residual's signs are coin flips, so a branch on each would
-		// mispredict half the time. |x| accumulates exactly what fillRow's
-		// +x / -x does.
+		// mispredict half the time. |x| accumulates exactly what a row at a
+		// time's +x / -x does.
 		simd.BlockSignAbs(block, dims, &absSums, words)
 		for g := 0; g < w; g++ {
 			for r, i := range rows[:n] {
@@ -409,13 +357,168 @@ func workRow(v []float32, unit bool) []float32 {
 	return row
 }
 
-// fillRow encodes one working row's residual to the column's centroid into
-// row i: the stored norm, the rotated residual's sign bits, and the
-// alignment scalar. row is already at working precision (unit-normalized
-// for a cosine column) and non-nil. A norm of 0 — the row IS the centroid,
-// or is within a float32 ulp of it — stores no bits and an alignment of 0,
-// which is exactly the no-norm-no-alignment agreement the reader checks.
-// The test is on the STORED norm, because that is what the reader sees.
+func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
+	if b.borrowed != nil && withCentroid == (b.cOff > 0) {
+		return bytes.Clone(b.borrowed), nil
+	}
+	rows, w := b.Rows(), bitWords(dims)
+	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || b.fast == nil && len(b.Words) != rows*w) {
+		return nil, fmt.Errorf("rabitq: inconsistent 1-bit codes")
+	}
+	magic := rowsMagic
+	if withCentroid {
+		magic = bitsMagic
+	}
+	metric := byte(metricRaw)
+	if b.Unit {
+		metric = metricUnit
+	}
+	le := binary.LittleEndian
+	out := make([]byte, 0, bitsHeader+4*dims+8*rows+8*rows*w)
+	out = le.AppendUint16(append(out, magic...), bitsVersion)
+	out = append(out, metric, queryBits)
+	out = le.AppendUint32(out, uint32(dims))
+	out = le.AppendUint32(out, uint32(rows))
+	out = le.AppendUint64(out, b.Seed)
+	if withCentroid {
+		for i := range dims {
+			out = le.AppendUint32(out, math.Float32bits(b.centroid(i)))
+		}
+	}
+	for i := range rows {
+		out = le.AppendUint32(out, math.Float32bits(b.norm(i)))
+	}
+	for i := range rows {
+		out = le.AppendUint32(out, math.Float32bits(b.align(i)))
+	}
+	for i := range rows * w {
+		out = le.AppendUint64(out, b.word(i))
+	}
+	return out, nil
+}
+
+// decodeBits decodes and validates a DQB1 part (withCentroid) or a DQR1
+// part, whose centroid is the one given; borrow keeps the rows in data.
+// Everything a row's score depends on is checked here, before any of it
+// prunes a rerank: the exact length the header implies, finite scalars, a
+// nonnegative residual norm, an alignment inside the range the encoder can
+// produce (it is <x_b, x> for a unit x, so it cannot be below 1/sqrt(D) nor
+// above 1), the agreement between "no residual" and "no alignment", and
+// zero padding in the bits past the last dimension.
+func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Quantizer, error) {
+	magic := rowsMagic
+	if withCentroid {
+		magic = bitsMagic
+	}
+	if len(data) < bitsHeader || string(data[:4]) != magic {
+		return Quantizer{}, fmt.Errorf("rabitq: invalid 1-bit codes header")
+	}
+	if v := binary.LittleEndian.Uint16(data[4:]); v != bitsVersion {
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes version %d, this reader speaks %d", v, bitsVersion)
+	}
+	metric, qbits := data[6], data[7]
+	if metric != metricRaw && metric != metricUnit {
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes metric byte %d", metric)
+	}
+	if qbits != queryBits {
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes want %d query bits, this reader has %d", qbits, queryBits)
+	}
+	dims, rows := int(binary.LittleEndian.Uint32(data[8:])), int(binary.LittleEndian.Uint32(data[12:]))
+	seed := binary.LittleEndian.Uint64(data[16:])
+	if dims <= 0 || rows < 0 || seed == 0 {
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes shape %dx%d seed %d", rows, dims, seed)
+	}
+	cOff := 0
+	if withCentroid {
+		cOff = 4 * dims
+	} else if len(centroid) != dims {
+		return Quantizer{}, fmt.Errorf("rabitq: a %d-wide centroid for %d-wide codes", len(centroid), dims)
+	}
+	w := bitWords(dims)
+	want := uint64(bitsHeader) + uint64(cOff) + 8*uint64(rows) + 8*uint64(rows)*uint64(w)
+	if want != uint64(len(data)) {
+		return Quantizer{}, fmt.Errorf("rabitq: 1-bit codes are %d bytes, a %dx%d part is %d", len(data), rows, dims, want)
+	}
+	// An owned decode copies the rows out first and validates the copy; a
+	// borrowed one validates in place.
+	in := Code{Seed: seed, Unit: metric == metricUnit, borrowed: data, rows: rows, dims: dims, cOff: cOff}
+	if !withCentroid {
+		in.Centroid = centroid
+	}
+	b, code := &in, (*Code)(nil)
+	if !borrow {
+		code = in.copyRows(dims, rows, 0, nil)
+		b = code
+	}
+	for i := 0; i < dims; i++ {
+		x := b.centroid(i)
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return Quantizer{}, fmt.Errorf("rabitq: centroid dimension %d is %v", i, x)
+		}
+	}
+	floor := 0.999 / math.Sqrt(float64(dims))
+	for i := 0; i < rows; i++ {
+		n, a := b.norm(i), b.align(i)
+		if !finiteNonnegative(n) {
+			return Quantizer{}, fmt.Errorf("rabitq: row %d residual norm %v", i, n)
+		}
+		if a == zeroRowAlign {
+			if !b.Unit || n != 0 {
+				return Quantizer{}, fmt.Errorf("rabitq: row %d is marked directionless but carries norm %v", i, n)
+			}
+			continue
+		}
+		if math.IsNaN(float64(a)) || a < 0 || a > 1 {
+			return Quantizer{}, fmt.Errorf("rabitq: row %d alignment %v", i, a)
+		}
+		if (n == 0) != (a == 0) {
+			return Quantizer{}, fmt.Errorf("rabitq: row %d residual norm %v and alignment %v disagree", i, n, a)
+		}
+		if n != 0 && float64(a) < floor {
+			return Quantizer{}, fmt.Errorf("rabitq: row %d alignment %v is below the %v a %d-wide sign code can produce", i, a, floor, dims)
+		}
+		if n == 0 {
+			for j := 0; j < w; j++ {
+				if b.word(i*w+j) != 0 {
+					return Quantizer{}, fmt.Errorf("rabitq: row %d has no residual but carries bits", i)
+				}
+			}
+		}
+		if pad := uint(w*64 - dims); pad > 0 && b.word((i+1)*w-1)>>(64-pad) != 0 {
+			return Quantizer{}, fmt.Errorf("rabitq: row %d sets bits past dimension %d", i, dims)
+		}
+	}
+	if borrow {
+		out := in // in itself stays on the stack
+		code = &out
+	}
+	return Quantizer{Dims: dims, Code: code}, nil
+}
+
+// sameFrame reports whether o's rows were encoded exactly as b's: same
+// width, seed, metric frame and centroid, so a query bound to b scores o.
+func (b *Code) sameFrame(o *Code) bool {
+	if b == o {
+		return true
+	}
+	if b == nil || o == nil || b.Seed != o.Seed || b.Unit != o.Unit || b.width() != o.width() {
+		return false
+	}
+	if len(b.Centroid) > 0 && len(o.Centroid) == len(b.Centroid) && &b.Centroid[0] == &o.Centroid[0] {
+		return true // one centroid slice: codes decoded against a shared centroid
+	}
+	for i := 0; i < b.width(); i++ {
+		if b.centroid(i) != o.centroid(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// fillRow encodes one non-nil working row into row i: the stored norm, the
+// rotated residual's sign bits and the alignment, exactly as fillRows does.
+// AppendRows uses it because a block of FillBlock lanes costs more than the
+// handful of rows an append usually brings.
 func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	dims := len(b.Centroid)
 	w := bitWords(dims)
@@ -444,198 +547,71 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	b.Aligns[i] = float32(min(1, align))
 }
 
-func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
-	if b.borrowed != nil && withCentroid == (b.cOff > 0) {
-		return bytes.Clone(b.borrowed), nil
-	}
-	rows, w := b.Rows(), bitWords(dims)
-	if b.borrowed == nil && (len(b.Aligns) != rows || len(b.Centroid) != dims || b.fast == nil && len(b.Words) != rows*w) {
-		return nil, fmt.Errorf("quant: inconsistent 1-bit codes")
-	}
-	var out bytes.Buffer
-	out.Grow(bitsHeader + 4*dims + 8*rows + 8*rows*w)
-	magic := rowsMagic
-	if withCentroid {
-		magic = bitsMagic
-	}
-	out.WriteString(magic)
-	var scratch [8]byte
-	put16 := func(v uint16) { binary.LittleEndian.PutUint16(scratch[:2], v); out.Write(scratch[:2]) }
-	put32 := func(v uint32) { binary.LittleEndian.PutUint32(scratch[:4], v); out.Write(scratch[:4]) }
-	put64 := func(v uint64) { binary.LittleEndian.PutUint64(scratch[:8], v); out.Write(scratch[:8]) }
-	put16(bitsVersion)
-	metric := byte(metricRaw)
-	if b.Unit {
-		metric = metricUnit
-	}
-	out.WriteByte(metric)
-	out.WriteByte(queryBits)
-	put32(uint32(dims))
-	put32(uint32(rows))
-	put64(b.Seed)
-	if withCentroid {
-		for i := range dims {
-			put32(math.Float32bits(b.centroid(i)))
-		}
-	}
-	for i := range rows {
-		put32(math.Float32bits(b.norm(i)))
-	}
-	for i := range rows {
-		put32(math.Float32bits(b.align(i)))
-	}
-	for i := range rows * w {
-		put64(b.word(i))
-	}
-	return out.Bytes(), nil
+// newBitScorer is small enough to inline, so a Scorer kept in a local
+// variable keeps its bitScorer on the caller's stack.
+func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
+	s := new(bitScorer)
+	c.bind(s, q, rc)
+	return s
 }
 
-// unmarshalBits decodes and validates a 1-bit codes part. Everything a row's
-// score depends on is checked here, before any of it prunes a rerank: the
-// exact length the header implies, finite scalars, a nonnegative residual
-// norm, an alignment inside the range the encoder can produce (it is
-// <x_b, x> for a unit x, so it cannot be below 1/sqrt(D) nor above 1), the
-// agreement between "no residual" and "no alignment", and zero padding in
-// the bits past the last dimension.
-func unmarshalBits(data []byte) (Quantizer, error) { return decodeBits(data, true, false, nil) }
-
-func unmarshalBitsBorrowed(data []byte) (Quantizer, error) { return decodeBits(data, true, true, nil) }
-
-// decodeBits decodes a DQB1 part (withCentroid) or a DQR1 part, whose
-// centroid is the one given.
-func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Quantizer, error) {
-	magic := rowsMagic
-	if withCentroid {
-		magic = bitsMagic
-	}
-	if len(data) < bitsHeader || string(data[:4]) != magic {
-		return Quantizer{}, fmt.Errorf("quant: invalid 1-bit codes header")
-	}
-	if v := binary.LittleEndian.Uint16(data[4:]); v != bitsVersion {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes version %d, this reader speaks %d", v, bitsVersion)
-	}
-	metric, qbits := data[6], data[7]
-	if metric != metricRaw && metric != metricUnit {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes metric byte %d", metric)
-	}
-	if qbits != queryBits {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes want %d query bits, this reader has %d", qbits, queryBits)
-	}
-	dims, rows := int(binary.LittleEndian.Uint32(data[8:])), int(binary.LittleEndian.Uint32(data[12:]))
-	seed := binary.LittleEndian.Uint64(data[16:])
-	if dims <= 0 || rows < 0 || seed == 0 {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes shape %dx%d seed %d", rows, dims, seed)
-	}
-	cOff := 0
-	if withCentroid {
-		cOff = 4 * dims
-	} else if len(centroid) != dims {
-		return Quantizer{}, fmt.Errorf("quant: a %d-wide centroid for %d-wide codes", len(centroid), dims)
-	}
+// copyRows is an owned, unpacked copy of b's rows idx (nil: rows 0..n-1),
+// every scalar and bit verbatim, with extra zero rows after them for the
+// caller to encode. A centroid in borrowed bytes is copied out.
+func (b *Code) copyRows(dims, n, extra int, idx []int) *Code {
 	w := bitWords(dims)
-	want := uint64(bitsHeader) + uint64(cOff) + 8*uint64(rows) + 8*uint64(rows)*uint64(w)
-	if want != uint64(len(data)) {
-		return Quantizer{}, fmt.Errorf("quant: 1-bit codes are %d bytes, a %dx%d part is %d", len(data), rows, dims, want)
-	}
-	b := &Code{Seed: seed, Unit: metric == metricUnit, rows: rows, dims: dims, cOff: cOff}
-	if !withCentroid {
-		b.Centroid = centroid
-	}
-	if borrow {
-		b.borrowed = data
-	} else {
-		b.Words = make([]uint64, rows*w)
-		b.Norms = make([]float32, rows)
-		b.Aligns = make([]float32, rows)
-		if withCentroid {
-			b.Centroid = make([]float32, dims)
-			for i := range b.Centroid {
-				b.Centroid[i] = b.centroidFrom(data, i)
-			}
-		}
-		for i := range b.Norms {
-			b.Norms[i] = b.normFrom(data, i)
-			b.Aligns[i] = b.alignFrom(data, i)
-		}
-		for i := range b.Words {
-			b.Words[i] = b.wordFrom(data, i)
+	out := &Code{Words: make([]uint64, (n+extra)*w), Centroid: b.Centroid,
+		Norms: make([]float32, n+extra), Aligns: make([]float32, n+extra), Seed: b.Seed, Unit: b.Unit}
+	if b.borrowed != nil {
+		out.Centroid = make([]float32, dims)
+		for i := range out.Centroid {
+			out.Centroid[i] = b.centroid(i)
 		}
 	}
-	for i := 0; i < dims; i++ {
-		x := b.centroid(i)
-		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-			return Quantizer{}, fmt.Errorf("quant: centroid dimension %d is %v", i, x)
-		}
+	// copy() for owned columns and a straight decode of borrowed words are
+	// the fast paths; packed columns go through word().
+	owned := b.borrowed == nil && b.Words != nil
+	if owned && idx == nil {
+		copy(out.Words, b.Words[:n*w])
+		copy(out.Norms, b.Norms[:n])
+		copy(out.Aligns, b.Aligns[:n])
+		return out
 	}
-	floor := 0.999 / math.Sqrt(float64(dims))
-	for i := 0; i < rows; i++ {
-		n, a := b.norm(i), b.align(i)
-		if !finiteNonnegative(n) {
-			return Quantizer{}, fmt.Errorf("quant: row %d residual norm %v", i, n)
+	if b.borrowed != nil && idx == nil {
+		le, d := binary.LittleEndian, b.borrowed[bitsHeader+b.cOff:]
+		for i := range n {
+			out.Norms[i] = math.Float32frombits(le.Uint32(d[4*i:]))
+			out.Aligns[i] = math.Float32frombits(le.Uint32(d[4*b.rows+4*i:]))
 		}
-		if a == zeroRowAlign {
-			if !b.Unit || n != 0 {
-				return Quantizer{}, fmt.Errorf("quant: row %d is marked directionless but carries norm %v", i, n)
-			}
+		d = d[8*b.rows:]
+		for i := range n * w {
+			out.Words[i] = le.Uint64(d[8*i:])
+		}
+		return out
+	}
+	for j := range n {
+		r := j
+		if idx != nil {
+			r = idx[j]
+		}
+		if owned {
+			copy(out.Words[j*w:(j+1)*w], b.Words[r*w:(r+1)*w])
+			out.Norms[j], out.Aligns[j] = b.Norms[r], b.Aligns[r]
 			continue
 		}
-		if math.IsNaN(float64(a)) || a < 0 || a > 1 {
-			return Quantizer{}, fmt.Errorf("quant: row %d alignment %v", i, a)
-		}
-		if (n == 0) != (a == 0) {
-			return Quantizer{}, fmt.Errorf("quant: row %d residual norm %v and alignment %v disagree", i, n, a)
-		}
-		if n != 0 && float64(a) < floor {
-			return Quantizer{}, fmt.Errorf("quant: row %d alignment %v is below the %v a %d-wide sign code can produce", i, a, floor, dims)
-		}
-		if n == 0 {
-			for j := 0; j < w; j++ {
-				if b.word(i*w+j) != 0 {
-					return Quantizer{}, fmt.Errorf("quant: row %d has no residual but carries bits", i)
-				}
+		if b.borrowed != nil {
+			src := b.borrowed[bitsHeader+b.cOff+8*b.rows+8*r*w:]
+			for i := range w {
+				out.Words[j*w+i] = binary.LittleEndian.Uint64(src[8*i:])
+			}
+		} else {
+			for i := range w {
+				out.Words[j*w+i] = b.word(r*w + i)
 			}
 		}
-		if pad := uint(w*64 - dims); pad > 0 && b.word((i+1)*w-1)>>(64-pad) != 0 {
-			return Quantizer{}, fmt.Errorf("quant: row %d sets bits past dimension %d", i, dims)
-		}
+		out.Norms[j], out.Aligns[j] = b.norm(r), b.align(r)
 	}
-	if !borrow {
-		b.rows, b.dims, b.cOff = 0, 0, 0 // owned Code keeps its historical shape
-	}
-	return Quantizer{Dims: dims, Code: b}, nil
-}
-
-// sameFrame reports whether o's rows were encoded exactly as b's: same
-// width, seed, metric frame and centroid, so a query bound to b scores o.
-func (b *Code) sameFrame(o *Code) bool {
-	if b == o {
-		return true
-	}
-	if b == nil || o == nil || b.Seed != o.Seed || b.Unit != o.Unit || b.width() != o.width() {
-		return false
-	}
-	if len(b.Centroid) > 0 && len(o.Centroid) == len(b.Centroid) && &b.Centroid[0] == &o.Centroid[0] {
-		return true // one centroid slice: codes decoded against a shared centroid
-	}
-	for i := 0; i < b.width(); i++ {
-		if b.centroid(i) != o.centroid(i) {
-			return false
-		}
-	}
-	return true
-}
-
-func (b *Code) centroidFrom(data []byte, i int) float32 {
-	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+4*i:]))
-}
-func (b *Code) normFrom(data []byte, i int) float32 {
-	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+b.cOff+4*i:]))
-}
-func (b *Code) alignFrom(data []byte, i int) float32 {
-	return math.Float32frombits(binary.LittleEndian.Uint32(data[bitsHeader+b.cOff+4*b.rows+4*i:]))
-}
-func (b *Code) wordFrom(data []byte, i int) uint64 {
-	return binary.LittleEndian.Uint64(data[bitsHeader+b.cOff+8*b.rows+8*i:])
+	return out
 }
 
 // bitScorer is one hood's bits bound to one query: the query's residual to
@@ -673,12 +649,6 @@ type bitScorer struct {
 	l2     bool
 	resid  []float32
 	codes  []byte
-}
-
-func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
-	s := new(bitScorer)
-	c.bind(s, q, rc)
-	return s
 }
 
 // bindGlobal sets s to the global query q against c (BindGlobal checked
@@ -782,10 +752,6 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	// rounding residual's norm rather than bounded worst-case (a worst-case
 	// query term is sqrt(D)*delta/2, three times the data term at 128 dims,
 	// and it would swamp a bound whose whole job is to prune).
-	// Once per probed hood, so it is a hood's fixed cost: the builtin
-	// min and max inline where math.Min and math.Max are calls, the sums
-	// stay in registers, and the planes are set without a branch per bit.
-	// The codes are the same, bit for bit.
 	inv := 1 / s.qNorm
 	lo, hi := simd.MinMaxScaled(resid, inv)
 	delta := (hi - lo) / queryLevels
@@ -851,9 +817,9 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 
 // rowIP is <x_b, u~>: the four bit-plane popcounts, plus the row's own
 // popcount for the v_l term, in one pass over the row's words
-// (bitproduct.go; the AVX2 kernel on amd64). s.b is read here, not at
-// binding: Quantizer.Scorer rebinds a scorer to another hood's codes in
-// the same frame, and that hood has its own row count and representation.
+// (simd.BitProduct*). s.b is read here, not at binding: Scorer.With and
+// Scorer.Use move a scorer to another hood's codes in the same frame, and
+// that hood has its own row count and representation.
 func (s *bitScorer) rowIP(row int) float64 {
 	if s.g != nil {
 		return s.globalIP(row)
@@ -1020,17 +986,24 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 // nibbles through the query's two tables (its codes' low and high halves)
 // gives each row's Σ b_j code_j.
 func (s *bitScorer) scoreAllGlobal(f *fastLayout, scores, bounds []float32) {
-	n := 32 * f.blocks
-	if cap(s.sums) < 2*n {
-		s.sums = make([]uint16, 2*n)
-	}
-	lo, hi := s.sums[:n], s.sums[n:2*n]
-	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	lo, hi := s.scan2(f)
 	if bounds == nil {
 		s.scoreFastGlobal(f, lo, hi, scores)
 		return
 	}
 	s.scoreBoundsGlobal(f, lo, hi, scores, bounds)
+}
+
+// scan2 runs the global query's two tables over f's nibbles: row r's
+// Σ b_j code_j is lo[r] + 16*hi[r].
+func (s *bitScorer) scan2(f *fastLayout) (lo, hi []uint16) {
+	n := 32 * f.blocks
+	if cap(s.sums) < 2*n {
+		s.sums = make([]uint16, 2*n)
+	}
+	lo, hi = s.sums[:n], s.sums[n:2*n]
+	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	return lo, hi
 }
 
 // scoreFastGlobal is scoreFast for a global query: estimate(r, true, rip,
@@ -1094,11 +1067,7 @@ func (s *bitScorer) scoreBoundsGlobal(f *fastLayout, lo, hi []uint16, scores, bo
 			if !s.exact {
 				sigma := math.Sqrt((1-align*align)/s.freeD+s.varQ) / align
 				if near := math.Abs(ip) - s.sigmas*sigma; near > 0 {
-					// near > 0 excludes NaN, so this clamp needs no NaN handling.
-					perp2 := 1 - near*near
-					if perp2 < 0 {
-						perp2 = 0
-					}
+					perp2 := max(0, 1-near*near)
 					sigma = math.Sqrt((1-align*align)*perp2/s.freeD+s.varQ) / align
 				}
 				slack = 2 * norm * qn * s.sigmas * sigma
@@ -1120,12 +1089,7 @@ func (s *bitScorer) scoreBoundsGlobal(f *fastLayout, lo, hi []uint16, scores, bo
 // Keep ordinary score-only scoring separate so it pays no metadata-summary cost.
 func (s *bitScorer) scoreAllLazy(scores []float32) BoundHint {
 	f := s.b.fast
-	n := 32 * f.blocks
-	if cap(s.sums) < 2*n {
-		s.sums = make([]uint16, 2*n)
-	}
-	lo, hi := s.sums[:n], s.sums[n:2*n]
-	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	lo, hi := s.scan2(f)
 	qn, low, delta, scale, inv := s.qNorm, s.low, s.delta, s.scale, s.inv
 	q2 := qn * qn
 	tail := s.delta*s.sumQ + float64(s.dims)*s.low
@@ -1185,12 +1149,7 @@ func (s *bitScorer) refineBounds(scores, bounds []float32, cutoff float32, slack
 		return 0
 	}
 	f := s.b.fast
-	n := 32 * f.blocks
-	if cap(s.sums) < 2*n {
-		s.sums = make([]uint16, 2*n)
-	}
-	lo, hi := s.sums[:n], s.sums[n:2*n]
-	simd.FastScan2(f.nibs, s.g.lutLo, s.g.lutHi, f.groups, f.blocks, lo, hi)
+	lo, hi := s.scan2(f)
 	for row := range bounds {
 		if bounds[row] < cutoff {
 			continue
@@ -1243,12 +1202,8 @@ func scoreOf(l2 bool, dist2 float64) float64 {
 	return min(1, max(-1, 1-dist2/2))
 }
 
-// nextUp is math.Nextafter32(x, +Inf), inlined. The row loop called
-// math.Max (an assembly function, never inlined) three times and
-// Nextafter32 once per row, and those calls were ~28% of the 1-bit scan
-// (BenchmarkBitScore profile); the builtin max and min inline and
-// agree with math.Max and math.Min on every argument the loop can hold (they
-// differ only on max(+Inf, NaN), and no bound term is +Inf beside a NaN).
+// nextUp is math.Nextafter32(x, +Inf) (TestNextUpIsNextafter32).
+// math.Nextafter32 does not inline into the row loops; this does.
 func nextUp(x float32) float32 {
 	switch {
 	case x < 0: // the common case for L2 bounds

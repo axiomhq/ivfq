@@ -17,11 +17,7 @@ func globalColumn(t testing.TB, v [][]float32, metric ivfq.Metric) (Quantizer, *
 	if err != nil {
 		t.Fatal(err)
 	}
-	cent := make([]float32, c.Dims)
-	for i := range cent {
-		cent[i] = c.Code.centroid(i)
-	}
-	c.PackFastScanFrame(RotateCentroid(cent, rot))
+	c.PackFastScanFrame(RotateCentroid(c.Code.Centroid, rot))
 	return c, rot
 }
 
@@ -125,17 +121,7 @@ func TestRotatedInvalidatesGlobal(t *testing.T) {
 // one far from the origin. It also logs the estimate's RMS error and the
 // bound's mean width beside the per-column scorer's.
 func TestGlobalBoundCoversAtItsConfidence(t *testing.T) {
-	rng := rand.New(rand.NewSource(11))
-	axis := func(n, d int) [][]float32 {
-		out := make([][]float32, n)
-		for i := range out {
-			out[i] = make([]float32, d)
-			for j := 0; j < 6; j++ {
-				out[i][rng.Intn(d)] = float32(rng.NormFloat64() * 4)
-			}
-		}
-		return out
-	}
+	axis := axisCorpus()
 	for _, tc := range []struct {
 		name string
 		v, q [][]float32
@@ -192,11 +178,7 @@ func BenchmarkHoodBindAndScore(b *testing.B) {
 	for _, dims := range []int{128, 768} {
 		v := offCentre(256, dims, 5)
 		c, rot := globalColumn(b, v, ivfq.L2)
-		cent := make([]float32, dims)
-		for i := range cent {
-			cent[i] = c.Code.centroid(i)
-		}
-		rc := RotateCentroid(cent, rot)
+		rc := RotateCentroid(c.Code.Centroid, rot)
 		q := offCentre(1, dims, 6)[0]
 		scores := make([]float32, 256)
 		var s Scorer

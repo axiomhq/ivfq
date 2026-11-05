@@ -3,10 +3,11 @@ package rabitq
 import (
 	"errors"
 	"fmt"
-	"github.com/axiomhq/ivfq"
-	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"slices"
+
+	"github.com/axiomhq/ivfq"
+	"github.com/axiomhq/ivfq/internal/simd"
 )
 
 // Quantizer is one cluster's candidate column: one Code row per vector,
@@ -35,13 +36,73 @@ type Options struct {
 	Rotation *Rotation
 }
 
-// Quantize is the ONE door a hood's codes are written through. vectors are the hood's rows in id order, already at
-// the precision the exact rerank will read them at.
+// Quantize encodes a hood's rows as 1-bit residuals to their own mean.
+// vectors are the rows in id order, already at the precision the exact
+// rerank will read them at. An empty corpus still produces a valid,
+// zero-row column, because a hood may legitimately hold only tombstones.
 func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
-	if opts.Rotation == nil {
-		return Quantizer{}, errors.New("rabitq: 1-bit codes need a rotation")
+	if err := checkFrame(opts); err != nil {
+		return Quantizer{}, err
 	}
-	return quantizeBits(vectors, opts.Metric, opts.Rotation)
+	dims := opts.Rotation.dims
+	for i, v := range vectors {
+		if len(v) != dims {
+			return Quantizer{}, fmt.Errorf("rabitq: row %d is %d-wide, the field is %d", i, len(v), dims)
+		}
+	}
+	unit := opts.Metric == ivfq.Cosine
+	rows := len(vectors)
+	b := &Code{
+		Words:    make([]uint64, rows*bitWords(dims)),
+		Centroid: make([]float32, dims),
+		Norms:    make([]float32, rows),
+		Aligns:   make([]float32, rows),
+		Seed:     opts.Rotation.seed,
+		Unit:     unit,
+	}
+	// The rows the centroid is the mean of, in the frame they are encoded
+	// in: unit vectors for cosine, the vectors themselves for l2. A zero
+	// vector has no unit form, so it is not a member of the mean and not a
+	// row the estimator speaks for.
+	work := make([][]float32, rows)
+	sum := make([]float64, dims)
+	members := 0
+	for i, v := range vectors {
+		row := workRow(v, unit)
+		if row == nil {
+			b.Aligns[i] = zeroRowAlign
+			continue
+		}
+		work[i] = row
+		for j, x := range row {
+			sum[j] += float64(x)
+		}
+		members++
+	}
+	if members > 0 {
+		for j := range b.Centroid {
+			b.Centroid[j] = float32(sum[j] / float64(members))
+		}
+	}
+	b.fillRows(work, opts.Rotation)
+	return Quantizer{Dims: dims, Code: b}, nil
+}
+
+// checkFrame is what every column's frame needs: a rotation of a positive
+// width and a nonzero seed, and a metric the codec speaks.
+func checkFrame(opts Options) error {
+	rot := opts.Rotation
+	switch {
+	case rot == nil:
+		return errors.New("rabitq: 1-bit codes need a rotation")
+	case rot.dims <= 0:
+		return fmt.Errorf("rabitq: 1-bit codes need a positive width, got %d", rot.dims)
+	case rot.seed == 0:
+		return errors.New("rabitq: 1-bit codes need a nonzero rotation seed")
+	case opts.Metric != ivfq.L2 && opts.Metric != ivfq.Cosine:
+		return fmt.Errorf("rabitq: metric %s has no 1-bit codec", opts.Metric)
+	}
+	return nil
 }
 
 // Empty returns a column with no rows around centroid, in opts' frame:
@@ -49,17 +110,11 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 // is encoded against the cluster's own centroid rather than the mean of
 // whichever rows happened to start the block.
 func Empty(centroid []float32, opts Options) (Quantizer, error) {
-	if opts.Rotation == nil {
-		return Quantizer{}, errors.New("rabitq: 1-bit codes need a rotation")
+	if err := checkFrame(opts); err != nil {
+		return Quantizer{}, err
 	}
-	if opts.Rotation.dims <= 0 || len(centroid) != opts.Rotation.dims {
+	if len(centroid) != opts.Rotation.dims {
 		return Quantizer{}, fmt.Errorf("rabitq: empty column needs a %d-wide centroid, got %d", opts.Rotation.dims, len(centroid))
-	}
-	if opts.Rotation.seed == 0 {
-		return Quantizer{}, errors.New("rabitq: 1-bit codes need a nonzero rotation seed")
-	}
-	if opts.Metric != ivfq.L2 && opts.Metric != ivfq.Cosine {
-		return Quantizer{}, fmt.Errorf("rabitq: metric %s has no 1-bit codec", opts.Metric)
 	}
 	unit := opts.Metric == ivfq.Cosine
 	c := append([]float32(nil), centroid...)
@@ -84,38 +139,14 @@ func Empty(centroid []float32, opts Options) (Quantizer, error) {
 func (c Quantizer) Select(rows []int) (Quantizer, error) {
 	b := c.Code
 	if b == nil {
-		return Quantizer{}, fmt.Errorf("quant: select on a column with no payload")
+		return Quantizer{}, fmt.Errorf("rabitq: select on a column with no payload")
 	}
-	w := bitWords(c.Dims)
-	out := &Code{
-		Words:    make([]uint64, len(rows)*w),
-		Centroid: b.Centroid,
-		Norms:    make([]float32, len(rows)),
-		Aligns:   make([]float32, len(rows)),
-		Seed:     b.Seed,
-		Unit:     b.Unit,
-	}
-	if b.borrowed != nil {
-		out.Centroid = make([]float32, c.Dims)
-		for i := range out.Centroid {
-			out.Centroid[i] = b.centroid(i)
-		}
-	}
-	for j, r := range rows {
+	for _, r := range rows {
 		if r < 0 || r >= b.Rows() {
-			return Quantizer{}, fmt.Errorf("quant: row %d out of range for a %d-row column", r, b.Rows())
-		}
-		if b.borrowed != nil || b.Words == nil {
-			for i := 0; i < w; i++ {
-				out.Words[j*w+i] = b.word(r*w + i)
-			}
-			out.Norms[j], out.Aligns[j] = b.norm(r), b.align(r)
-		} else {
-			copy(out.Words[j*w:(j+1)*w], b.Words[r*w:(r+1)*w])
-			out.Norms[j], out.Aligns[j] = b.Norms[r], b.Aligns[r]
+			return Quantizer{}, fmt.Errorf("rabitq: row %d out of range for a %d-row column", r, b.Rows())
 		}
 	}
-	return Quantizer{Dims: c.Dims, Code: out}, nil
+	return Quantizer{Dims: c.Dims, Code: b.copyRows(c.Dims, len(rows), 0, rows)}, nil
 }
 
 // AppendRows returns a copy of the column with one freshly encoded row per
@@ -135,43 +166,16 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 	if rot == nil || rot.seed != b.Seed || rot.dims != dims {
 		return Quantizer{}, fmt.Errorf("rabitq: append needs the column's rotation (seed %d, %d wide)", b.Seed, dims)
 	}
-	w := bitWords(dims)
 	rows := b.Rows()
-	extra := len(vectors)
-	out := &Code{
-		Words:    make([]uint64, (rows+extra)*w),
-		Centroid: b.Centroid,
-		Norms:    make([]float32, rows+extra),
-		Aligns:   make([]float32, rows+extra),
-		Seed:     b.Seed,
-		Unit:     b.Unit,
-	}
-	if b.borrowed != nil {
-		out.Centroid = make([]float32, dims)
-		for i := range out.Centroid {
-			out.Centroid[i] = b.centroid(i)
-		}
-	}
-	if b.borrowed != nil || b.Words == nil {
-		for i := 0; i < rows*w; i++ {
-			out.Words[i] = b.word(i)
-		}
-		for i := 0; i < rows; i++ {
-			out.Norms[i], out.Aligns[i] = b.norm(i), b.align(i)
-		}
-	} else {
-		copy(out.Words, b.Words)
-		copy(out.Norms, b.Norms)
-		copy(out.Aligns, b.Aligns)
-	}
+	out := b.copyRows(dims, rows, len(vectors), nil)
 	scratch := make([]float32, dims)
 	for i, v := range vectors {
 		if len(v) != dims {
-			return Quantizer{}, fmt.Errorf("quant: appended row %d is %d-wide, the column is %d", i, len(v), dims)
+			return Quantizer{}, fmt.Errorf("rabitq: appended row %d is %d-wide, the column is %d", i, len(v), dims)
 		}
 		row := workRow(v, b.Unit)
 		if row == nil {
-			out.Norms[rows+i], out.Aligns[rows+i] = 0, zeroRowAlign
+			out.Aligns[rows+i] = zeroRowAlign
 			continue
 		}
 		out.fillRow(rows+i, row, rot, scratch)
@@ -181,7 +185,7 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 
 func (c Quantizer) MarshalBinary() ([]byte, error) {
 	if c.Code == nil {
-		return nil, fmt.Errorf("quant: codes with no payload")
+		return nil, fmt.Errorf("rabitq: codes with no payload")
 	}
 	return c.Code.marshal(c.Dims, true)
 }
@@ -191,7 +195,7 @@ func (c Quantizer) MarshalBinary() ([]byte, error) {
 // centroid once. UnmarshalRowsBorrowed takes the centroid back.
 func (c Quantizer) MarshalRows() ([]byte, error) {
 	if c.Code == nil {
-		return nil, fmt.Errorf("quant: codes with no payload")
+		return nil, fmt.Errorf("rabitq: codes with no payload")
 	}
 	return c.Code.marshal(c.Dims, false)
 }
@@ -206,23 +210,15 @@ func UnmarshalRowsBorrowed(data []byte, centroid []float32) (Quantizer, error) {
 }
 
 // UnmarshalBinary decodes MarshalBinary output. Everything a row's score
-// and bound rest on is checked there (rabitq.go, unmarshalBits), because the
-// candidate pass prunes the exact rerank with these values before any full
-// vector is read.
-func UnmarshalBinary(data []byte) (Quantizer, error) {
-	if len(data) >= 4 && string(data[:4]) == bitsMagic {
-		return unmarshalBits(data)
-	}
-	return Quantizer{}, fmt.Errorf("quant: codes are not %s", bitsMagic)
-}
+// and bound rest on is checked first (decodeBits), because the candidate
+// pass prunes the exact rerank with these values before any full vector is
+// read.
+func UnmarshalBinary(data []byte) (Quantizer, error) { return decodeBits(data, true, false, nil) }
 
 // UnmarshalBinaryBorrowed validates codes like UnmarshalBinary, but keeps
 // scalar and bit rows in data. The caller must keep data immutable and alive.
 func UnmarshalBinaryBorrowed(data []byte) (Quantizer, error) {
-	if len(data) >= 4 && string(data[:4]) == bitsMagic {
-		return unmarshalBitsBorrowed(data)
-	}
-	return Quantizer{}, fmt.Errorf("quant: codes are not %s", bitsMagic)
+	return decodeBits(data, true, true, nil)
 }
 
 // Query is a vector prepared for scoring many rows: the cosine query norm is
@@ -444,7 +440,8 @@ func (c *Quantizer) SameFrame(o *Quantizer) bool { return c.Code.sameFrame(o.Cod
 // an exact top-k cutoff only when its bound is below the cutoff.
 //
 // The bound is boundSigmas standard deviations of the RaBitQ estimator's
-// error and holds at boundConfidence, so "exact within the probed hoods" is
+// error and holds at the confidence boundSigmas sets
+// (TestBitBoundCoversAtItsConfidence), so "exact within the probed hoods" is
 // a recall guarantee rather than a certainty — unless Query.Exact is set,
 // which is how a caller buys the certainty back.
 func (s Scorer) ScoreAndBound(row int) (score, bound float32) { return s.bit.scoreAndBound(row) }
@@ -544,11 +541,6 @@ func (c Quantizer) ScoreAndBound(q Query, row int) (score, bound float32) {
 // has to pass before the candidate pass prunes anything with it.
 func finiteNonnegative(x float32) bool {
 	return !math.IsNaN(float64(x)) && !math.IsInf(float64(x), 0) && x >= 0
-}
-
-type ranked struct {
-	id    int
-	score float32
 }
 
 // subsetSums sets t[m] to the sum of those of c0..c3 whose bit is set in m:

@@ -1,11 +1,15 @@
 package rabitq
 
 import (
-	"github.com/axiomhq/ivfq/internal/simd"
+	"hash/fnv"
+	"io"
 	"math"
 	"math/bits"
 	"math/rand/v2"
+	"strings"
 	"sync"
+
+	"github.com/axiomhq/ivfq/internal/simd"
 )
 
 // The rotation RaBitQ's error bound assumes: a random orthogonal transform,
@@ -78,10 +82,7 @@ func NewRotation(seed uint64, dims int) *Rotation {
 		for i := range perm {
 			perm[i] = int32(i)
 		}
-		for i := dims - 1; i > 0; i-- {
-			j := rng.IntN(i + 1)
-			perm[i], perm[j] = perm[j], perm[i]
-		}
+		rng.Shuffle(dims, func(i, j int) { perm[i], perm[j] = perm[j], perm[i] })
 		coef := make([]float32, dims)
 		for i, p := range perm {
 			coef[i] = prev[p]
@@ -112,13 +113,7 @@ func (r *Rotation) Apply(v []float32) {
 	if r.dims <= 1 {
 		return
 	}
-	sp, _ := r.pool.Get().(*[]float32)
-	if sp == nil {
-		sp = new([]float32)
-	}
-	if len(*sp) < r.dims {
-		*sp = make([]float32, r.dims)
-	}
+	sp := r.scratch(r.dims)
 	src, dst := v[:r.dims], (*sp)[:r.dims]
 	for round := range r.perm {
 		simd.PermScale(dst, src, r.perm[round], r.coef[round])
@@ -143,13 +138,7 @@ func (r *Rotation) applyBlock(block []float32) {
 	if r.dims <= 1 {
 		return
 	}
-	sp, _ := r.pool.Get().(*[]float32)
-	if sp == nil {
-		sp = new([]float32)
-	}
-	if len(*sp) < len(block) {
-		*sp = make([]float32, len(block))
-	}
+	sp := r.scratch(len(block))
 	src, dst := block, (*sp)[:len(block)]
 	for round := range r.perm {
 		simd.PermScaleRows(dst, src, r.perm[round], r.coef[round])
@@ -164,6 +153,19 @@ func (r *Rotation) applyBlock(block []float32) {
 	r.pool.Put(sp)
 }
 
+// scratch is a pooled buffer of at least n floats, for the caller to Put
+// back.
+func (r *Rotation) scratch(n int) *[]float32 {
+	sp, _ := r.pool.Get().(*[]float32)
+	if sp == nil {
+		sp = new([]float32)
+	}
+	if len(*sp) < n {
+		*sp = make([]float32, n)
+	}
+	return sp
+}
+
 // Seed derives a rotation seed from names: FNV-1a over parts joined by
 // '/', an index and field name say. Deriving it rather than drawing it
 // keeps every column of a field in ONE frame, so one Rotation serves them
@@ -171,18 +173,10 @@ func (r *Rotation) applyBlock(block []float32) {
 // value is written into every column anyway, so a reader never re-derives
 // it and changing this function cannot strand existing columns.
 func Seed(parts ...string) uint64 {
-	const offset, prime = 14695981039346656037, 1099511628211
-	h := uint64(offset)
-	for i, s := range parts {
-		if i > 0 {
-			h = (h ^ '/') * prime
-		}
-		for j := 0; j < len(s); j++ {
-			h = (h ^ uint64(s[j])) * prime
-		}
+	h := fnv.New64a()
+	io.WriteString(h, strings.Join(parts, "/"))
+	if s := h.Sum64(); s != 0 {
+		return s
 	}
-	if h == 0 {
-		h = prime // 0 is the "unseeded" value the decoder rejects
-	}
-	return h
+	return 1099511628211 // the FNV prime: 0 is the "unseeded" value the decoder rejects
 }

@@ -1,10 +1,11 @@
 package rabitq
 
 import (
-	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"math/rand/v2"
 	"testing"
+
+	"github.com/axiomhq/ivfq/internal/simd"
 )
 
 func TestSeedNeverZero(t *testing.T) {
@@ -20,7 +21,7 @@ func TestSeedNeverZero(t *testing.T) {
 // products survive, for the widths whose blocks are all sizes (100 = 64+32+4).
 func TestRotationOrthogonal(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 6))
-	for _, dims := range []int{2, 3, 7, 33, 100, 128, 768, 1000, 1536} {
+	for _, dims := range []int{2, 3, 5, 7, 33, 100, 128, 768, 1000, 1536} {
 		rot := NewRotation(Seed("t", "o"), dims)
 		a, b := make([]float32, dims), make([]float32, dims)
 		var na, ab float64
@@ -59,22 +60,6 @@ func TestRotationSpreadsOneHot(t *testing.T) {
 		if worst > 40/float64(dims) { // uniform would be ~ 1/dims, tail ~ 2 ln(dims)/dims
 			t.Fatalf("dims=%d: one coordinate holds %.3f of a one-hot's energy", dims, worst)
 		}
-	}
-}
-
-func TestRotationPreservesNorm(t *testing.T) {
-	v := []float32{1, 2, 3, 4, 5}
-	var n0 float64
-	for _, x := range v {
-		n0 += float64(x) * float64(x)
-	}
-	NewRotation(Seed("t", "r"), len(v)).Apply(v)
-	var n1 float64
-	for _, x := range v {
-		n1 += float64(x) * float64(x)
-	}
-	if math.Abs(n0-n1) > 1e-5 {
-		t.Fatalf("norm %v -> %v", n0, n1)
 	}
 }
 

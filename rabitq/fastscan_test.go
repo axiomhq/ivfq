@@ -144,12 +144,8 @@ func TestBindRotatedReusesNothingStale(t *testing.T) {
 			t.Fatal(err)
 		}
 		c.PackFastScan()
-		cent := make([]float32, dims)
-		for j := range cent {
-			cent[j] = c.Code.centroid(j)
-		}
-		rc := RotateCentroid(cent, rot)
-		for qi, q := range [][]float32{v[1], cent, v[2]} {
+		rc := RotateCentroid(c.Code.Centroid, rot)
+		for qi, q := range [][]float32{v[1], c.Code.Centroid, v[2]} {
 			if qi == 1 {
 				// A cosine query against l2 codes cannot score: a dead
 				// bind between two live ones. The others rebind a live one.

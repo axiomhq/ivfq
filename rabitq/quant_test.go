@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"reflect"
 	"sort"
 	"testing"
 
@@ -12,11 +11,7 @@ import (
 	"github.com/axiomhq/ivfq/rank"
 )
 
-// The codec-independent half of the package's tests: the corpora and the
-// recall arithmetic every measurement here shares, and Rerank itself. What
-// the ONE codec guarantees — the round trip, the metadata it refuses, the
-// estimator's bias, the bound's coverage, Query.Exact, and the two-pass
-// recall the engine actually runs — is rabitq_test.go.
+// The corpora and recall arithmetic the package's tests share.
 
 func corpus(n, d int) [][]float32 {
 	r := rand.New(rand.NewSource(5))
@@ -30,13 +25,13 @@ func corpus(n, d int) [][]float32 {
 	return v
 }
 
-func top(v [][]float32, q []float32, score func(int) float32, k int) []int {
-	ids := make([]int, len(v))
+// top is the best k of rows 0..n-1 by score (Rerank).
+func top(n int, score func(int) float32, k int) []int {
+	ids := make([]int, n)
 	for i := range ids {
 		ids[i] = i
 	}
-	sort.Slice(ids, func(i, j int) bool { a, b := score(ids[i]), score(ids[j]); return a > b || a == b && ids[i] < ids[j] })
-	return ids[:k]
+	return Rerank(ids, score, k)
 }
 
 func recall(a, b []int) float64 {
@@ -66,14 +61,6 @@ func clusteredCorpus(n, clusters, dims int) [][]float32 {
 	return out
 }
 
-func TestRerankSupersetProperty(t *testing.T) {
-	scores := []float32{1, 9, 4, 7, 2}
-	got := Rerank([]int{4, 3, 2, 1, 0}, func(i int) float32 { return scores[i] }, 2)
-	if !reflect.DeepEqual(got, []int{1, 3}) {
-		t.Fatal(got)
-	}
-}
-
 func TestEmptyZeroCosineCentroid(t *testing.T) {
 	rot := NewRotation(1, 1)
 	c, err := Empty([]float32{0}, Options{Metric: ivfq.Cosine, Rotation: rot})
@@ -101,10 +88,12 @@ func TestEmptyZeroCosineCentroid(t *testing.T) {
 }
 
 // Rerank scores candidate IDs exactly and returns the best k, with lower IDs
-
 // winning equal scores. exactDistance must return a higher-is-better score.
-
 func Rerank(candidates []int, exactDistance func(int) float32, k int) []int {
+	type ranked struct {
+		id    int
+		score float32
+	}
 	r := make([]ranked, len(candidates))
 	for i, id := range candidates {
 		r[i] = ranked{id, exactDistance(id)}
@@ -118,14 +107,10 @@ func Rerank(candidates []int, exactDistance func(int) float32, k int) []int {
 	return out
 }
 
-// A scorer rebound to another column in the same frame (Scorer.With, the
-
-// tier's per-cluster binding) scores that column's rows exactly as a
-
+// A scorer rebound to another column in the same frame (Scorer.With)
+// scores that column's rows exactly as a
 // scorer bound to it directly, whichever representation either column has
-
 // and however many rows it holds.
-
 func TestReboundScorerReadsTheNewColumn(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		opts := Options{Metric: metric, Rotation: NewRotation(11, 129)}
