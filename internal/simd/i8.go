@@ -3,10 +3,15 @@ package simd
 import "math"
 
 // roundI8 is byte(int8(max(-128, min(127, math.Round(x))))) without
-// math.Round: clamping first leaves a value whose float64 sum with ±0.5 is
-// exact, so truncating it toward zero rounds half away from zero. An
-// integer already in range takes the first branch and is its own rounding.
+// math.Round: after clamping, truncating the float64 sum with ±0.5 toward
+// zero rounds half away from zero (the sum may round, never across an
+// integer). An integer already in range takes the first branch and is its
+// own rounding. NaN is 0 here: Go leaves its int32 conversion to the
+// platform.
 func roundI8(x float32) byte {
+	if x != x {
+		return 0
+	}
 	if i := int32(x); float32(i) == x && i >= -128 && i <= 127 {
 		return byte(int8(i))
 	}

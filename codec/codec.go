@@ -51,7 +51,7 @@ func RoundF16(v []float32) []float32 {
 }
 
 // EncodeI8 stores v as one int8 byte per value: round to the nearest
-// integer, ties away from zero, saturating to [-128,127].
+// integer, ties away from zero, saturating to [-128,127]. NaN encodes as 0.
 func EncodeI8(v []float32) []byte { return AppendI8(make([]byte, 0, len(v)), v) }
 
 // AppendI8 appends EncodeI8(v) to dst.
@@ -65,7 +65,7 @@ func DecodeI8(b []byte) []float32 {
 }
 
 // DecodeI8Into decodes len(dst) values of b into dst.
-func DecodeI8Into(dst []float32, b []byte) { simd.DecodeI8(dst, b[:len(dst)]) }
+func DecodeI8Into(dst []float32, b []byte) { simd.DecodeI8(dst, b) }
 
 // RoundI8 is DecodeI8(EncodeI8(v)), except that it returns v itself,
 // allocating nothing, when every value already is an i8 value — as every

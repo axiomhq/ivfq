@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"slices"
 	"testing"
-
-	"github.com/axiomhq/ivfq/internal/simd"
 )
 
 // TestF16RoundTripAndOverflow pins what f16 validation relies on: every
@@ -38,12 +36,16 @@ func TestF16RoundTripAndOverflow(t *testing.T) {
 	}
 }
 
-func TestStorageSizesAndI8Saturation(t *testing.T) {
+// The stored bytes are the wire format: little-endian binary16, and int8
+// rounded half away from zero and saturated.
+func TestStorageBytesAndI8Saturation(t *testing.T) {
 	v := []float32{-200, -1.5, 0, 1.5, 200}
-	f := EncodeF16(v)
+	if got, want := EncodeF16(v), []byte{0x40, 0xda, 0x00, 0xbe, 0x00, 0x00, 0x00, 0x3e, 0x40, 0x5a}; !slices.Equal(got, want) {
+		t.Fatalf("EncodeF16(%v) = % x, want % x", v, got, want)
+	}
 	i := EncodeI8(v)
-	if len(f) != 2*len(v) || len(i) != len(v) {
-		t.Fatal("size")
+	if want := []byte{0x80, 0xfe, 0x00, 0x02, 0x7f}; !slices.Equal(i, want) {
+		t.Fatalf("EncodeI8(%v) = % x, want % x", v, i, want)
 	}
 	d := DecodeI8(i)
 	want := []float32{-128, -2, 0, 2, 127}
@@ -65,7 +67,7 @@ func TestRoundStoredKeepsExactRowsWithoutAllocating(t *testing.T) {
 	if n := testing.AllocsPerRun(100, func() { RoundI8(exact); RoundF16(exact) }); n != 0 {
 		t.Errorf("%v allocations for exact rows", n)
 	}
-	for _, v := range [][]float32{{0.5, -0.5, 2.5, 127.6, -128.4, 300, -300}, {float32(math.Copysign(0, -1))}, {1e-3, 65519}} {
+	for _, v := range [][]float32{{0.5, -0.5, 2.5, 127.6, -128.4, 300, -300}, {float32(math.Copysign(0, -1))}, {1e-3, 65519}, {128, -129}} {
 		if got, want := RoundI8(v), DecodeI8(EncodeI8(v)); !slices.Equal(got, want) || math.Signbit(float64(got[0])) != math.Signbit(float64(want[0])) {
 			t.Errorf("RoundI8(%v) = %v, want %v", v, got, want)
 		}
@@ -118,10 +120,31 @@ func TestI8CodecsMatchScalar(t *testing.T) {
 	}
 }
 
+// A short b panics rather than decoding bytes past its length, even when
+// its spare capacity holds them.
+func TestDecodeShortPanics(t *testing.T) {
+	for _, n := range []int{5, 16} {
+		b := make([]byte, n/2, 2*n)
+		for name, f := range map[string]func(){
+			"DecodeI8Into":  func() { DecodeI8Into(make([]float32, n), b) },
+			"DecodeF16Into": func() { DecodeF16Into(make([]float32, n), b) },
+		} {
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Errorf("%s of %d values from %d bytes did not panic", name, n, len(b))
+					}
+				}()
+				f()
+			}()
+		}
+	}
+}
+
 // scalarI8 is EncodeI8's definition.
 func scalarI8(x float32) byte {
 	if x != x {
-		return simd.AppendI8(nil, []float32{x})[0] // NaN: whatever the scalar path does
+		return 0
 	}
 	return byte(int8(max(-128, min(127, math.Round(float64(x))))))
 }
