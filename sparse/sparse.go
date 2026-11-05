@@ -1,16 +1,18 @@
+// Package sparse holds the string-keyed sparse vector and its reference dot
+// product.
 package sparse
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
-	"sort"
+	"slices"
 )
 
 // Vector is the string-keyed sparse vector: sorted, unique Keys with
-// finite Values. Its JSON form is an object of key to weight. Sparse[T] is
-// the int-indexed form.
+// finite Values. Its JSON form is an object of key to weight.
 type Vector struct {
 	Keys   []string
 	Values []float32
@@ -32,11 +34,9 @@ func (v *Vector) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
 	}
-	decoded := Vector{Keys: make([]string, 0, len(object))}
-	for key := range object {
-		decoded.Keys = append(decoded.Keys, key)
-	}
-	sort.Strings(decoded.Keys)
+	// {} decodes to empty, non-nil Keys.
+	decoded := Vector{Keys: slices.AppendSeq(make([]string, 0, len(object)), maps.Keys(object))}
+	slices.Sort(decoded.Keys)
 	for _, key := range decoded.Keys {
 		var weight *float32
 		if err := json.Unmarshal(object[key], &weight); err != nil || weight == nil {

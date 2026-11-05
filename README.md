@@ -12,8 +12,8 @@ clusters, the codes and the scan.
 | package | what it holds |
 | --- | --- |
 | `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid `Tree`, the centroid codec, and the distance vocabulary (`Metric`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
-| `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids |
-| `rabitq` | 1-bit RaBitQ codes: `Quantize`, `Quantizer`, `Scorer`, `Rotation` |
+| `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids; `Config.FitBalanced` for splits |
+| `rabitq` | 1-bit RaBitQ codes, one bit per dimension plus two float32 per row: `Quantize`, `Quantizer`, `Scorer`, `Rotation` |
 | `rank` | top-k selection and reciprocal rank fusion |
 | `late` | late-interaction scoring of multi-vector documents |
 | `sparse` | the string-keyed sparse vector |
@@ -26,7 +26,7 @@ No I/O anywhere but `bench`.
 ## Build an index
 
 ```go
-k := ivfq.HoodK(len(vectors)) // clusters of about 1,024 rows
+k := ivfq.HoodK(len(vectors)) // clusters of about ivfq.HoodTarget (196) rows
 centroids, assign, err := kmeans.Config{K: k, Iters: 11, Seed: 1}.Fit(ctx, vectors)
 tree, err := ivfq.Build(ctx, centroids, 32)
 rot := rabitq.NewRotation(rabitq.Seed("index", "field"), dims)
@@ -39,8 +39,7 @@ every row in one parallel pass; the result is bit-identical whatever
 centroids, then k fine ones under them, and each row searches only its
 16 nearest coarse centroids' fine ones: about 17·√k distances per row,
 not k. To route rows later, `s := tree.NewSearcher()` then
-`s.Assign(row, beam)`, one `Searcher` per goroutine. One bit per dimension
-plus two float32 per row.
+`s.Assign(row, beam)`, one `Searcher` per goroutine.
 
 ## Query
 
@@ -65,7 +64,8 @@ preserve the original rescue order and use strict `bound < cutoff` rejection.
 executable `ExampleScorer_RefineBounds` in `rabitq/quant_test.go`.
 
 Splits and merges keep the clusters at their size as rows arrive: a split
-is `kmeans.Config{K: 2, Iters: kmeans.SplitIters}`, and `Policy`,
+is `kmeans.Config{K: 2, Iters: kmeans.SplitIters}.FitBalanced`, which keeps
+each child at least a quarter of the parent, and `Policy`,
 `MergeTargets`, `SplitAbove` and `MergeBelow` decide when, reading only
 per-cluster counts and radii. No rule ever touches every row.
 
@@ -88,17 +88,9 @@ per-cluster counts and radii. No rule ever touches every row.
 
 ## Kernels
 
-Every SIMD kernel lives in `internal/simd` with a pure Go reference and a
-test that pins it. amd64 picks the kernel at run time from
-`golang.org/x/sys/cpu`; every other architecture, and amd64 without the
-flags, runs the Go reference.
-
-| kernel | amd64 path | needs | claim | test |
-| --- | --- | --- | --- | --- |
-| `Dots` | `dotsAVX2FMA` | AVX2 + FMA | each `out[r]` equals `Dot(q, row r)` bit for bit | `TestDotsMatchesDot` |
-| 1-bit scan | `bitProductAVX2` | AVX2 + POPCNT | popcounts identical to the Go loop | `TestBitProductMatchesGeneric` |
-| rotation | `rotatePairsAVX2` | AVX2 | no FMA, so equal to the Go loop bit for bit | `TestRotatePairsMatchesGeneric` |
-| i8 codec | `decodeI8AVX2`, `encodeI8AVX2` | AVX2 | same bytes and floats as the scalar codec | `TestI8CodecsMatchScalar` |
+Every SIMD kernel lives in `internal/simd` beside a pure Go reference and a
+test that pins it to that reference; amd64 picks the kernel at run time from
+`golang.org/x/sys/cpu`, and every other architecture runs the reference.
 
 `Dot`, `L2Sq` and `CosineSim` keep several float32 accumulator lanes, so they
 can differ from a float64 loop by about 1e-7 relative. Rankings do not change,

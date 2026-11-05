@@ -1,9 +1,10 @@
 package late
 
 import (
-	"github.com/axiomhq/ivfq"
 	"math"
 	"testing"
+
+	"github.com/axiomhq/ivfq"
 )
 
 func TestLateInteractionPreservesTokenMatches(t *testing.T) {

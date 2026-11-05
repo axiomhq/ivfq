@@ -3,15 +3,17 @@
 package late
 
 import (
+	"errors"
 	"fmt"
-	"github.com/axiomhq/ivfq"
 	"math"
+
+	"github.com/axiomhq/ivfq"
 )
 
 // Validate checks a nonempty matrix of finite, fixed-width tokens.
 func Validate(tokens [][]float32, dims int) error {
 	if dims <= 0 || len(tokens) == 0 {
-		return fmt.Errorf("late-interaction requires at least one token and positive dimensions")
+		return errors.New("late-interaction requires at least one token and positive dimensions")
 	}
 	for i, token := range tokens {
 		if len(token) != dims {

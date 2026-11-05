@@ -1,25 +1,20 @@
 package codec
 
 import (
-	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/axiomhq/ivfq/internal/simd"
 )
 
-// TestF16RoundTripAndOverflow pins what WF-04 validation relies on: every
-
+// TestF16RoundTripAndOverflow pins what f16 validation relies on: every
 // f16-representable value survives the codec, and the first float32 that
-
 // rounds past f16's max (65520; 65519 still rounds down to 65504) decodes as
-
 // Inf so validation can reject it. The boundary rows are what a consumer
-
 // observes at f16's edges: the sign of zero, the smallest subnormal, the
-
 // underflow to signed zero below half of it, and NaN staying NaN.
-
 func TestF16RoundTripAndOverflow(t *testing.T) {
 	exact := []float32{0, 1, -1.5, 0.5, 65504, -65504, 5.9604645e-08, -5.9604645e-08, 1.0009766}
 	if got := DecodeF16(EncodeF16(exact)); !reflect.DeepEqual(got, exact) {
@@ -43,7 +38,7 @@ func TestF16RoundTripAndOverflow(t *testing.T) {
 	}
 }
 
-func TestStorageSizesAndScores(t *testing.T) {
+func TestStorageSizesAndI8Saturation(t *testing.T) {
 	v := []float32{-200, -1.5, 0, 1.5, 200}
 	f := EncodeF16(v)
 	i := EncodeI8(v)
@@ -81,11 +76,8 @@ func TestRoundStoredKeepsExactRowsWithoutAllocating(t *testing.T) {
 }
 
 // The vector i8 codecs are the scalar ones: integral groups (in and out
-
 // of range, -0, huge) through the kernel, groups with a fraction or a NaN
-
 // through roundI8, and every length's remainder.
-
 func TestI8CodecsMatchScalar(t *testing.T) {
 	special := []float32{0, float32(math.Copysign(0, -1)), 1, -1, 127, -128, 128, -129, 300, -300, 1e9, -1e9,
 		2147483648, -2147483904, 0.5, -0.5, 2.5, float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))}
@@ -127,7 +119,6 @@ func TestI8CodecsMatchScalar(t *testing.T) {
 }
 
 // scalarI8 is EncodeI8's definition.
-
 func scalarI8(x float32) byte {
 	if x != x {
 		return simd.RoundI8(x) // NaN: whatever the scalar path does
@@ -135,14 +126,8 @@ func scalarI8(x float32) byte {
 	return byte(int8(max(-128, min(127, math.Round(float64(x))))))
 }
 
-// roundI8 itself on integers, which the vector kernel takes instead on a
-
-// host with AVX2: the scalar fallback must agree with the definition too.
-
 // A hood of 1,000 i8 rows at 128 dims, as a rewrite decodes and
-
 // re-encodes it.
-
 func BenchmarkI8Column(b *testing.B) {
 	const rows, dims = 1000, 128
 	raw := make([]byte, rows*dims)

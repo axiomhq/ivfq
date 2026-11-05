@@ -1,16 +1,20 @@
+// Package kmeans fits centroids for an IVF index: sampled greedy k-means++
+// with one parallel assignment pass, two-level above TwoLevelK, and the
+// size-floored 2-means a cluster split uses.
 package kmeans
 
 import (
 	"cmp"
 	"context"
 	"errors"
-	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 	"math/rand"
 	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
+
+	"github.com/axiomhq/ivfq/internal/simd"
 )
 
 // trainFactor sets the k-means training sample at trainFactor x k vectors.
@@ -64,15 +68,16 @@ type Config struct {
 }
 
 // SplitIters is the iteration count a cluster split uses:
-// Config{K: 2, Iters: SplitIters}.
+// Config{K: 2, Iters: SplitIters}.FitBalanced.
 const SplitIters = 8
 
 // Fit fits c.K centroids on a deterministic random sample of at most
 // SampleSize(c.K) vectors, then assigns EVERY vector in one parallel pass.
 // It returns the centroids and each vector's centroid index. This is the
-// only k-means a build runs at scale: with fixed-size clusters k = N/1024,
-// so Lloyd's over all N would be O(N^2/S) per iteration. Sampling collapses
-// the iterated term to the sample and leaves exactly one O(N x k) pass.
+// only k-means a build runs at scale: with fixed-size clusters
+// k = N/ivfq.HoodTarget, so Lloyd's over all N would be O(N^2/S) per
+// iteration. Sampling collapses the iterated term to the sample and leaves
+// exactly one O(N x k) pass.
 //
 // When the sample covers the corpus the result is the plain fit over every
 // vector. An empty corpus returns nil, nil, nil. A cancelled ctx returns
@@ -170,7 +175,7 @@ func sample(ctx context.Context, vecs [][]float32, s int, seed int64) ([][]float
 // chosen, so the seeds spread over the corpus instead of clumping wherever
 // the density happens to be.
 //
-// With k = N/1024 a build asks for thousands of centroids, and a uniform
+// With k = N/ivfq.HoodTarget a build asks for thousands of centroids, and a uniform
 // init strands a large share of them in near-empty space next to a few
 // enormous clusters: at 10M it left 74% of clusters outside [S/4, 2S] with
 // a p25 of four vectors.
@@ -285,21 +290,7 @@ func costWith(d2 []float32, vecs [][]float32, c []float32) float64 {
 	}
 	const chunk = 4096
 	parts := make([]float64, (n+chunk-1)/chunk)
-	var next atomic.Int64
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Go(func() {
-			for {
-				j := int(next.Add(1)) - 1
-				if j >= len(parts) {
-					return
-				}
-				lo := j * chunk
-				parts[j] = chunkSum(lo, min(lo+chunk, n))
-			}
-		})
-	}
-	wg.Wait()
+	forChunks(n, chunk, func(lo, hi int) { parts[lo/chunk] = chunkSum(lo, hi) })
 	var sum float64
 	for _, p := range parts {
 		sum += p
@@ -319,39 +310,18 @@ func minInto(d2 []float32, vecs [][]float32, c []float32) {
 			}
 		}
 	}
-	workers := min(runtime.GOMAXPROCS(0), n)
-	if workers < 2 || n < parallelMin {
+	if n < parallelMin {
 		step(0, n)
 		return
 	}
-	const chunk = 256
-	var next atomic.Int64
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Go(func() {
-			for {
-				lo := int(next.Add(chunk)) - chunk
-				if lo >= n {
-					return
-				}
-				step(lo, min(lo+chunk, n))
-			}
-		})
-	}
-	wg.Wait()
+	forChunks(n, 256, step)
 }
 
+// run is k-means++ seeding then Lloyd's over all of vecs, which must be
+// non-empty, with k >= 1.
 func run(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spherical bool) ([][]float32, []int, error) {
 	n := len(vecs)
-	if n == 0 {
-		return nil, nil, nil
-	}
-	if k < 1 {
-		k = 1
-	}
-	if k > n {
-		k = n
-	}
+	k = min(k, n) // a MaxBytes sample can hold fewer rows than k
 	rng := rand.New(rand.NewSource(seed))
 	centroids, err := seedPlusPlus(ctx, vecs, k, rng)
 	if err != nil {
@@ -400,7 +370,7 @@ func lloyd(ctx context.Context, vecs, centroids [][]float32, assign []int, iters
 				// set gives each simultaneous empty cluster a distinct
 				// seed WITHOUT mutating assign — mutating assign could
 				// steal a live cluster's sole member and mint a duplicate
-				// at low iteration budgets (review fix, round 2).
+				// at low iteration budgets.
 				fi := farthest(vecs, centroids, assign, claimed)
 				centroids[c] = slices.Clone(vecs[fi])
 				if spherical {
@@ -454,7 +424,7 @@ func assignAll(ctx context.Context, centroids, vecs [][]float32, assign []int) b
 }
 
 // assignWith is assignAll for any nearest-centroid rule: assign[i] =
-// nearest(i) for i < n, which may read assign[i] before it is replaced.
+// nearest(i) for i < n.
 // work is the distance calls one vector costs, for the serial cutoff.
 func assignWith(ctx context.Context, n int, assign []int, work int, nearest func(int) int) bool {
 	const chunk = 256
@@ -468,24 +438,41 @@ func assignWith(ctx context.Context, n int, assign []int, work int, nearest func
 		}
 		return changed
 	}
-	var next atomic.Int64
 	var changed atomic.Bool
+	forChunks(n, chunk, func(lo, hi int) {
+		if ctx.Err() == nil && assignRange(nearest, assign, lo, hi) {
+			changed.Store(true)
+		}
+	})
+	return changed.Load()
+}
+
+// forChunks calls f on [0,n) in chunk-sized ranges, each exactly once, over
+// GOMAXPROCS workers, or in order on this goroutine when there is one.
+// Callers write only their own slots, so results do not depend on the
+// worker count.
+func forChunks(n, chunk int, f func(lo, hi int)) {
+	workers := min(runtime.GOMAXPROCS(0), (n+chunk-1)/chunk)
+	if workers < 2 {
+		for lo := 0; lo < n; lo += chunk {
+			f(lo, min(lo+chunk, n))
+		}
+		return
+	}
+	var next atomic.Int64
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for range workers {
 		wg.Go(func() {
-			for ctx.Err() == nil {
-				lo := int(next.Add(chunk)) - chunk
+			for {
+				lo := int(next.Add(int64(chunk))) - chunk
 				if lo >= n {
 					return
 				}
-				if assignRange(nearest, assign, lo, min(lo+chunk, n)) {
-					changed.Store(true)
-				}
+				f(lo, min(lo+chunk, n))
 			}
 		})
 	}
 	wg.Wait()
-	return changed.Load()
 }
 
 func assignRange(nearest func(int) int, assign []int, lo, hi int) bool {

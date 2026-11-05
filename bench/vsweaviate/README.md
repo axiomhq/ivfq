@@ -12,7 +12,7 @@ go test -run 'TestEstimatorQuality|TestSplitQuality' -v    # recall / WCSS table
 go test -run '^$' -bench . -benchtime 200ms -count 5 -cpu 1
 ```
 
-Measured against weaviate `0d36ea43` on a 2.6 GHz Xeon (AVX2, AVX-512, VNNI),
+Last run against weaviate `0d36ea43` on a 2.6 GHz Xeon (AVX2, AVX-512, VNNI),
 Go 1.27.1, one P. The VM is noisy: small ops move up to 2x between runs, so
 read medians of `-count 5` and ignore differences under ~20%.
 
@@ -20,6 +20,6 @@ read medians of `-count 5` and ignore differences under ~20%.
 |---|---|
 | `kernels_test.go` | `internal/simd` + `go-simd/floats` vs `hnsw/distancer/asm`: f32 dot / L2, u8 dot / L2, f32×u8 dot, 1-bit plane scan |
 | `rq_test.go` | `rabitq` vs `BinaryRotationalQuantizer`: rotation, encode, query bind, scan, recall |
-| `kmeans_test.go` | `kmeans.Config{K:2}.Fit` vs `KMeans.FitBalanced` |
+| `kmeans_test.go` | `kmeans.Config{K:2}` `Fit` and `FitBalanced` vs `KMeans.Fit` and `KMeans.FitBalanced` |
 
 `weaviate/sroar` has no ivfq counterpart (ivfq has no bitmap type), so it is not benchmarked.

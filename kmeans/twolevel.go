@@ -3,9 +3,6 @@ package kmeans
 import (
 	"context"
 	"math"
-	"runtime"
-	"sync"
-	"sync/atomic"
 
 	"github.com/axiomhq/ivfq/internal/simd"
 )
@@ -69,9 +66,6 @@ func fitTwoLevel(ctx context.Context, vecs [][]float32, s, k, iters int, seed in
 		return nil, nil, err
 	}
 	assign := make([]int, len(vecs))
-	for i := range assign {
-		assign[i] = -1
-	}
 	t.assign(ctx, vecs, assign)
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -212,21 +206,8 @@ func shares(sizes []int, k int) []int {
 // error by index. Each f writes only its own slots, so results do not
 // depend on the worker count.
 func parallel(n int, f func(int) error) error {
-	var next atomic.Int64
-	var wg sync.WaitGroup
 	errs := make([]error, n)
-	for range min(runtime.GOMAXPROCS(0), n) {
-		wg.Go(func() {
-			for {
-				i := int(next.Add(1)) - 1
-				if i >= n {
-					return
-				}
-				errs[i] = f(i)
-			}
-		})
-	}
-	wg.Wait()
+	forChunks(n, 1, func(i, _ int) { errs[i] = f(i) })
 	for _, err := range errs {
 		if err != nil {
 			return err

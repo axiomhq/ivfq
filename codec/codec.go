@@ -5,9 +5,9 @@ package codec
 
 import (
 	"encoding/binary"
-	"github.com/axiomhq/ivfq/internal/simd"
 	"math"
 
+	"github.com/axiomhq/ivfq/internal/simd"
 	"github.com/x448/float16"
 )
 
@@ -24,6 +24,7 @@ func AppendF16(dst []byte, v []float32) []byte {
 	return dst
 }
 
+// DecodeF16 decodes the len(b)/2 values of EncodeF16's output b.
 func DecodeF16(b []byte) []float32 {
 	v := make([]float32, len(b)/2)
 	DecodeF16Into(v, b)
@@ -49,14 +50,14 @@ func RoundF16(v []float32) []float32 {
 	return v
 }
 
-// EncodeI8 rounds to the nearest integer, ties away from zero, and saturates
-// to [-128,127]. This is an implementation choice because the public docs do
-// not prescribe conversion of floating-point inputs to i8 storage.
+// EncodeI8 stores v as one int8 byte per value: round to the nearest
+// integer, ties away from zero, saturating to [-128,127].
 func EncodeI8(v []float32) []byte { return AppendI8(make([]byte, 0, len(v)), v) }
 
 // AppendI8 appends EncodeI8(v) to dst.
 func AppendI8(dst []byte, v []float32) []byte { return simd.AppendI8(dst, v) }
 
+// DecodeI8 decodes the len(b) values of EncodeI8's output b.
 func DecodeI8(b []byte) []float32 {
 	v := make([]float32, len(b))
 	DecodeI8Into(v, b)

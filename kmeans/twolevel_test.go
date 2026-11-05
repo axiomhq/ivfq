@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
-	"sync"
 	"testing"
 	"time"
 
@@ -132,7 +131,7 @@ func TestTwoLevelQuality(t *testing.T) {
 	all := clusters(11, n+nq, dims, k, 1)
 	vecs, queries := all[:n], all[n:]
 	truth := make([][]int, nq)
-	parallelFor(nq, func(q int) { truth[q] = bruteTop(vecs, nil, queries[q], topK) })
+	forChunks(nq, 1, func(q, _ int) { truth[q] = bruteTop(vecs, nil, queries[q], topK) })
 
 	type result struct {
 		sse, recall float64
@@ -159,7 +158,7 @@ func TestTwoLevelQuality(t *testing.T) {
 			}
 		}
 		hits := make([]int, nq)
-		parallelFor(nq, func(q int) {
+		forChunks(nq, 1, func(q, _ int) {
 			probe := bruteTop(cents, nil, queries[q], nprobe)
 			var cand []int
 			for _, c := range probe {
@@ -240,23 +239,4 @@ func bruteTop(vecs [][]float32, ids []int, q []float32, k int) []int {
 		out = append(out, h.id)
 	}
 	return out
-}
-
-func parallelFor(n int, f func(int)) {
-	var wg sync.WaitGroup
-	next := make(chan int)
-	for range runtime.GOMAXPROCS(0) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range next {
-				f(i)
-			}
-		}()
-	}
-	for i := range n {
-		next <- i
-	}
-	close(next)
-	wg.Wait()
 }
