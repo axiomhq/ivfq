@@ -18,11 +18,11 @@ import (
 )
 
 // trainFactor sets the k-means training sample at trainFactor x k vectors.
-// Lloyd's needs enough points per centroid to place it, not all of them: at
-// 32 the sample is 3% of a 1M corpus and moves recall by less than the
-// run-to-run noise. Below
-// ~16 the fit degrades; above ~64 nothing improves and the training term
-// starts to matter again.
+// Lloyd's needs enough points per centroid to place it, not all of them:
+// measured with ~1,000-vector clusters (a 3% sample of a 1M corpus), 32
+// moved recall by less than the run-to-run noise. Below ~16 the fit
+// degrades; above ~64 nothing improves and the training term starts to
+// matter again.
 const trainFactor = 32
 
 // minSample floors the training set in absolute terms. The factor alone is
@@ -51,7 +51,9 @@ func sampleSizeForBudget(k, dims, bytes int) int {
 
 // Config is one k-means fit.
 type Config struct {
-	// K is how many centroids to fit, clamped to [1, len(vecs)].
+	// K is how many centroids to fit, clamped to [1, len(vecs)]. A
+	// MaxBytes sample with fewer rows than K lowers it to that row count,
+	// so size by the result's length, not K.
 	K int
 	// Iters is how many Lloyd iterations follow the k-means++ seeding.
 	Iters int
@@ -63,7 +65,8 @@ type Config struct {
 	// monotone in cosine, so assignment stays L2 everywhere.
 	Spherical bool
 	// MaxBytes caps the training sample by its float32 footprint on top of
-	// SampleSize(K). Zero means SampleSize(K) alone.
+	// SampleSize(K); it bounds the sample, not the result. Zero means
+	// SampleSize(K) alone.
 	MaxBytes int
 }
 
@@ -78,6 +81,10 @@ const SplitIters = 8
 // k = N/ivfq.HoodTarget, so Lloyd's over all N would be O(N^2/S) per
 // iteration. Sampling collapses the iterated term to the sample and leaves
 // exactly one O(N x k) pass.
+//
+// Every vector must be as long as the first and finite: one of another
+// length panics, and a NaN coordinate can pull every vector into one cluster.
+// The centroids are new slices; vecs is not modified.
 //
 // When the sample covers the corpus the result is the plain fit over every
 // vector. An empty corpus returns nil, nil, nil. A cancelled ctx returns
@@ -180,9 +187,9 @@ func sample(ctx context.Context, vecs [][]float32, s int, seed int64) ([][]float
 // enormous clusters: at 10M it left 74% of clusters outside [S/4, 2S] with
 // a p25 of four vectors.
 //
-// Cost is k passes, each one distance per vector: k*n L2Sq calls, against the
-// (iters+1)*n*k Lloyd's does — about one extra iteration's worth, and it
-// usually pays for itself by converging in fewer. The per-step update is
+// Cost is k steps, each a nearest-seed update plus seedTrials candidate
+// costs over every vector: (1+seedTrials)*k*n L2Sq calls, against the
+// (iters+1)*n*k Lloyd's does. The per-step update is
 // parallel and each index is written independently, so like assignAll the
 // result is bit-identical at any worker count; the draws come from rng alone,
 // so it is deterministic for a given seed.
@@ -236,9 +243,9 @@ func seedPlusPlus(ctx context.Context, vecs [][]float32, k int, rng *rand.Rand) 
 }
 
 // seedTrials is the greedy candidate count. Standard practice is
-// 2 + log(k); a flat 4 is within noise of that over the k range a 1M to
-// 100M index asks for (977 to 97,657, so 2+log k is 9 to 13) and costs a quarter as
-// much as 13 would. Cost is seedTrials * k * sample distance calls.
+// 2 + ln(k); a flat 4 measured within noise of that for k from 977 to
+// 97,657 (2 + ln k from 9 to 13) and costs about a third as much as 13 would.
+// Cost is seedTrials * k * sample distance calls.
 const seedTrials = 4
 
 // drawD2 returns the index D^2 sampling picks for a uniform draw u in [0,1).
@@ -255,8 +262,7 @@ func drawD2(d2 []float32, sum float64, u float64) int {
 
 // costWith is the total squared error if c joined the centroid set: the
 // quantity greedy k-means++ minimizes over its candidates, and the seeding's
-// dominant term at seedTrials * k * n distance calls (1.2e10 at 10M), so it
-// fans out.
+// dominant term at seedTrials * k * n distance calls, so it fans out.
 //
 // It is deliberately EXACT over the whole training sample. Estimating it on a
 // stride was measured and dropped: the whole benefit of greedy over plain D^2
@@ -522,10 +528,12 @@ func farthest(vecs [][]float32, centroids [][]float32, assign []int, claimed map
 // ceil(n/4) of the vectors, so a split always shrinks the parent to at most
 // 3n/4 and a skewed cluster cannot shed a sliver again and again. It seeds and
 // runs Lloyd's as Fit does over every vector (a split is one cluster's size),
-// and returns that when it already meets the floor. Otherwise, for up to Iters rounds, it assigns by distance difference, moving the
-// vectors that lose least across the boundary when a side is under the floor,
-// and re-means. The centroids are the means of the returned assignment, which
-// is therefore not always nearest-centroid.
+// and returns that when it already meets the floor. Otherwise, for up to
+// max(1, Iters) rounds, it assigns by distance difference, moving the
+// vectors that lose least across the boundary when a side is under the
+// floor, and re-means. The centroids are the means of the returned
+// assignment (unit-normalized when Spherical), which is therefore not always
+// nearest-centroid. Vectors follow Fit's rules; MaxBytes is not used.
 func (c Config) FitBalanced(ctx context.Context, vecs [][]float32) ([][]float32, []int, error) {
 	n := len(vecs)
 	if c.K != 2 || n < 2 {
