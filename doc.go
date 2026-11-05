@@ -10,6 +10,7 @@
 // gives every cluster a 1-bit candidate column with a scorer and an error
 // bound, rank selects and fuses hits, late scores multi-vector documents,
 // sparse is the string-keyed sparse vector, codec stores rows at f16 and
-// int8, and bench reads the standard ANN corpora. No I/O anywhere but
+// int8, vector reads flat float32, f16, int8 or uint8 input as float32
+// rows, and bench reads the standard ANN corpora. No I/O anywhere but
 // bench.
 package ivfq
