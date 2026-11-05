@@ -1,6 +1,7 @@
 package ivfq
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/binary"
@@ -683,6 +684,23 @@ func TestTreeUpsertErrors(t *testing.T) {
 	}
 	if err := tree.Upsert(tree.Leaves()+1, make([]float32, 8)); err == nil {
 		t.Fatal("a non-contiguous append was accepted")
+	}
+	before, _ := tree.MarshalBinary()
+	for _, x := range []float32{float32(math.NaN()), float32(math.Inf(-1)), 3e19} {
+		for _, id := range []int{3, tree.Leaves()} { // replace, append
+			v := make([]float32, 8)
+			v[5] = x
+			if err := tree.Upsert(id, v); err == nil {
+				t.Fatalf("Upsert(%d) of a %v coordinate was accepted", id, x)
+			}
+		}
+	}
+	if after, _ := tree.MarshalBinary(); !bytes.Equal(before, after) {
+		t.Fatal("a rejected upsert changed the tree")
+	}
+	var empty Tree
+	if err := empty.Upsert(0, []float32{float32(math.NaN()), 1}); err == nil || empty.Dims() != 0 {
+		t.Fatalf("an empty tree took a rejected vector: err %v, dims %d", err, empty.Dims())
 	}
 }
 

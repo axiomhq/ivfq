@@ -685,8 +685,10 @@ func (t Tree) Clone() Tree {
 
 // Upsert replaces leaf id's centroid with v, or appends v as a new leaf
 // when id equals the number of leaves; any other id is an error, since
-// appends must stay contiguous. The height never changes and the result
-// round-trips through MarshalBinary and UnmarshalTree.
+// appends must stay contiguous, and so is a vector whose squared norm is not
+// a finite float32 (a NaN or infinite coordinate, or a huge one). The
+// height never changes and the result round-trips through MarshalBinary and
+// UnmarshalTree.
 //
 // A replace moves the leaf to the holder nearest to v (replace), so a
 // slot refilled with a far centroid stays reachable. Internal centroids
@@ -704,6 +706,11 @@ func (t Tree) Clone() Tree {
 // holder, so correctness holds and quality degrades slowly; rebuild once
 // enough upserts have accumulated.
 func (t *Tree) Upsert(id int, v []float32) error {
+	// The search ranks by the squared norm: NaN or Inf there (a non-finite
+	// coordinate, or one past about 1.8e19) ranks no holder nearest.
+	if n := float64(Dot(v, v)); math.IsNaN(n) || math.IsInf(n, 0) {
+		return fmt.Errorf("ivf: upsert of a vector whose squared norm is %v", n)
+	}
 	t.dropI8()
 	if len(t.nodes) == 0 && len(t.leaves) == 0 {
 		// An empty tree adopts v's dimensions: Build over no centroids
