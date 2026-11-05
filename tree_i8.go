@@ -20,10 +20,10 @@ type nodeI8 struct {
 }
 
 // QuantizeI8 gives every leaf holder an int8 copy of its leaves for
-// EvaluationsBeamI8: a quarter of the bytes the leaf scan reads, which at
+// EvaluationsBeamI8Work: a quarter of the bytes the leaf scan reads, which at
 // 768 dimensions was 12.7 MB a query. It is derived, never serialized, and
 // dropped by any change to the tree (Upsert, Truncate), after which
-// EvaluationsBeamI8 reads the float32 leaves until QuantizeI8 runs again.
+// EvaluationsBeamI8Work reads the float32 leaves until QuantizeI8 runs again.
 // It writes t, so call it before t is shared.
 func (t *Tree) QuantizeI8() {
 	for i := range t.nodes {
@@ -90,7 +90,15 @@ func quantizeI8(v []float32, dst []int8) (scale, err, norm8 float32) {
 	return scale, float32(math.Sqrt(e2)), float32(math.Sqrt(n2))
 }
 
-// EvaluationsBeamI8 is EvaluationsBeam, the same leaves in the same order,
+// TreeWork is a tree search's centroid work: Float32 is the float32
+// distances it computed, internal nodes included, and Quantized the int8
+// leaf distances it computed beside them. Every centroid a search scores is
+// in one of the two.
+type TreeWork struct {
+	Float32, Quantized int
+}
+
+// EvaluationsBeamI8Work is EvaluationsBeam, the same leaves in the same order,
 // with the leaf scan read through the holders' int8 copies (QuantizeI8).
 // The beam over internal nodes is EvaluationsBeam's own, in float32, so it
 // visits the same holders. Each scanned leaf gets an int8 distance and an
@@ -100,29 +108,9 @@ func quantizeI8(v []float32, dst []int8) (scale, err, norm8 float32) {
 //
 // and its float32 distance is computed, as EvaluationsBeam computes it,
 // only for the probe nearest by int8 and for any other leaf whose lower
-// bound is within the probe-th float32 distance so far. The count is the
-// float32 distances computed, internal nodes included; the int8 distances
-// are not counted (EvaluationsBeamI8Work reports both). A tree without its
-// int8 copies (not quantized, or changed since) is searched by
-// EvaluationsBeam.
-func (t Tree) EvaluationsBeamI8(q []float32, beam, probe int) ([]int, int) {
-	ids, work := t.EvaluationsBeamI8Work(q, beam, probe)
-	return ids, work.Float32
-}
-
-// TreeWork is a tree search's centroid work: Float32 is the float32
-// distances it computed, internal nodes included, and Quantized the int8
-// leaf distances it computed beside them. Every centroid a search scores is
-// in one of the two.
-type TreeWork struct {
-	Float32, Quantized int
-}
-
-// Total is every centroid distance computed, float32 and int8.
-func (w TreeWork) Total() int { return w.Float32 + w.Quantized }
-
-// EvaluationsBeamI8Work is EvaluationsBeamI8, the same leaves, with the
-// int8 distances counted beside the float32 ones.
+// bound is within the probe-th float32 distance so far. TreeWork counts
+// both kinds of distance. A tree without its int8 copies (not quantized,
+// or changed since) is searched by EvaluationsBeam.
 func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWork) {
 	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
 		return nil, TreeWork{}

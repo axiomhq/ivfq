@@ -347,10 +347,10 @@ func TestFitSampledBoundsTraining(t *testing.T) {
 }
 
 func TestSampleSizeForBudget(t *testing.T) {
-	if got := SampleSizeForBudget(1000, 128, 1<<20); got > (1<<20)/(128*4) {
+	if got := sampleSizeForBudget(1000, 128, 1<<20); got > (1<<20)/(128*4) {
 		t.Fatalf("sample has %d vectors, exceeds byte budget", got)
 	}
-	if got := SampleSizeForBudget(1000, 128, 1); got != 1 {
+	if got := sampleSizeForBudget(1000, 128, 1); got != 1 {
 		t.Fatalf("minimum sample = %d, want 1", got)
 	}
 }

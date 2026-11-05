@@ -107,7 +107,7 @@ func Rerank(candidates []int, exactDistance func(int) float32, k int) []int {
 	return out
 }
 
-// A scorer rebound to another column in the same frame (Scorer.With)
+// A scorer moved to another column in the same frame (Scorer.Use)
 // scores that column's rows exactly as a
 // scorer bound to it directly, whichever representation either column has
 // and however many rows it holds.
@@ -142,7 +142,8 @@ func TestReboundScorerReadsTheNewColumn(t *testing.T) {
 			if !small.SameFrame(&target) {
 				t.Fatalf("%s: columns are not in one frame", metric)
 			}
-			rebound := small.Scorer(q).With(&target)
+			rebound := small.Scorer(q)
+			rebound.Use(&target)
 			direct := target.Scorer(q)
 			for row := 0; row < target.Rows(); row++ {
 				gs, gb := rebound.ScoreAndBound(row)

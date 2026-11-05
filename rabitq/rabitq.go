@@ -549,9 +549,9 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 
 // newBitScorer is small enough to inline, so a Scorer kept in a local
 // variable keeps its bitScorer on the caller's stack.
-func (c *Quantizer) newBitScorer(q Query, rc []float32) *bitScorer {
+func (c *Quantizer) newBitScorer(q Query) *bitScorer {
 	s := new(bitScorer)
-	c.bind(s, q, rc)
+	c.bind(s, q, nil)
 	return s
 }
 
@@ -817,9 +817,9 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 
 // rowIP is <x_b, u~>: the four bit-plane popcounts, plus the row's own
 // popcount for the v_l term, in one pass over the row's words
-// (simd.BitProduct*). s.b is read here, not at binding: Scorer.With and
-// Scorer.Use move a scorer to another hood's codes in the same frame, and
-// that hood has its own row count and representation.
+// (simd.BitProduct*). s.b is read here, not at binding: Scorer.Use moves a
+// scorer to another hood's codes in the same frame, and that hood has its
+// own row count and representation.
 func (s *bitScorer) rowIP(row int) float64 {
 	if s.g != nil {
 		return s.globalIP(row)

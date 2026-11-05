@@ -10,9 +10,6 @@ func bitProductAVX2(row *byte, planes *uint64, words int) (ones, weighted uint64
 	panic("unreachable")
 }
 
-func dotF32I8AVX512(x *float32, b *byte, n int) float32 { panic("unreachable") }
-func dotF32I8AVX2(x *float32, b *byte, n int) float32   { panic("unreachable") }
-
 func dotsAVX2FMA(q *float32, block *float32, dims int, rows int, out *float32) { panic("unreachable") }
 func dotsF32AVX512(q *float32, block *float32, dims, rows int, out *float32)   { panic("unreachable") }
 func l2sqF32AVX512(a *float32, b *float32, n int) float32                      { panic("unreachable") }

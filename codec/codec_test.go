@@ -121,7 +121,7 @@ func TestI8CodecsMatchScalar(t *testing.T) {
 // scalarI8 is EncodeI8's definition.
 func scalarI8(x float32) byte {
 	if x != x {
-		return simd.RoundI8(x) // NaN: whatever the scalar path does
+		return simd.AppendI8(nil, []float32{x})[0] // NaN: whatever the scalar path does
 	}
 	return byte(int8(max(-128, min(127, math.Round(float64(x))))))
 }

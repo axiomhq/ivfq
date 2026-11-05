@@ -212,7 +212,7 @@ func BenchmarkL2U8(b *testing.B) {
 	}
 }
 
-// float32 query x byte row. ivfq: DotF32I8 (fused) and the older DecodeI8+Dot.
+// float32 query x byte row. ivfq decodes the int8 row, then Dot.
 // Weaviate reads the bytes as uint8, ivfq as int8; the work is the same.
 func BenchmarkDotFloatByte(b *testing.B) {
 	r := rand.New(rand.NewPCG(1, 2))
@@ -221,11 +221,6 @@ func BenchmarkDotFloatByte(b *testing.B) {
 		b.Run(fmt.Sprintf("d=%d/wv_fused_avx256", d), func(b *testing.B) {
 			var s float32
 			pairs(b, 5*d, func(i int) { s += asm.DotFloatByteAVX256(x[i], y[i]) })
-			sinkF = s
-		})
-		b.Run(fmt.Sprintf("d=%d/ivfq_DotF32I8_fused", d), func(b *testing.B) {
-			var s float32
-			pairs(b, 5*d, func(i int) { s += simd.DotF32I8(x[i], y[i]) })
 			sinkF = s
 		})
 		tmp := make([]float32, d)
@@ -296,7 +291,7 @@ func BenchmarkBitScan(b *testing.B) {
 // TestKernelsAgreeAllLengths runs our kernels and weaviate's side by side on
 // every length 1..140 and a few large ones, with large magnitudes and the
 // extreme byte values: float kernels within float32 reassociation error,
-// integer kernels exactly. Bytes for DotF32I8 are kept below 128, where
+// integer kernels exactly. Bytes for the f32 x i8 dot are kept below 128, where
 // weaviate's uint8 and our int8 reading are the same number.
 func TestKernelsAgreeAllLengths(t *testing.T) {
 	r := rand.New(rand.NewPCG(11, 12))
@@ -335,7 +330,9 @@ func TestKernelsAgreeAllLengths(t *testing.T) {
 		for i := range x {
 			fb += float64(x[i]) * float64(b[i])
 		}
-		if a, w := float64(simd.DotF32I8(x, b)), float64(asm.DotFloatByteAVX256(x, b)); math.Abs(a-fb) > 2e-5*magD*0.2+1e-3*float64(n) || math.Abs(a-w) > 1e-3*float64(n)+2e-5*math.Abs(fb) {
+		decoded := make([]float32, n)
+		simd.DecodeI8(decoded, b)
+		if a, w := float64(simd.Dot(x, decoded)), float64(asm.DotFloatByteAVX256(x, b)); math.Abs(a-fb) > 2e-5*magD*0.2+1e-3*float64(n) || math.Abs(a-w) > 1e-3*float64(n)+2e-5*math.Abs(fb) {
 			t.Errorf("f32xi8 n=%d: ours %v weaviate %v exact %v", n, a, w, fb)
 		}
 

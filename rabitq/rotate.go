@@ -101,12 +101,6 @@ func NewRotation(seed uint64, dims int) *Rotation {
 	return r
 }
 
-// Seed is the seed r was derived from.
-func (r *Rotation) Seed() uint64 { return r.seed }
-
-// Dims is the width of the vectors r rotates.
-func (r *Rotation) Dims() int { return r.dims }
-
 // Apply rotates v in place. v must be r.dims long.
 func (r *Rotation) Apply(v []float32) {
 	_ = v[r.dims-1]

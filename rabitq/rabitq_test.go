@@ -79,8 +79,8 @@ func TestBorrowedBitCodesMatchOwned(t *testing.T) {
 		}
 		q := NewQuery(vectors[3], metric, rotOf(owned))
 		for row := 0; row < borrowed.Rows(); row++ {
-			gotScore, gotBound := borrowed.ScoreAndBound(q, row)
-			wantScore, wantBound := owned.ScoreAndBound(q, row)
+			gotScore, gotBound := borrowed.Scorer(q).ScoreAndBound(row)
+			wantScore, wantBound := owned.Scorer(q).ScoreAndBound(row)
 			if gotScore != wantScore || gotBound != wantBound {
 				t.Fatalf("%s row %d score/bound (%v,%v), want (%v,%v)", metric, row, gotScore, gotBound, wantScore, wantBound)
 			}
@@ -129,8 +129,8 @@ func TestRowsCodesMatchBitCodes(t *testing.T) {
 		for _, qi := range []int{3, 40} {
 			q := NewQuery(vectors[qi], metric, rotOf(owned))
 			for row := 0; row < got.Rows(); row++ {
-				gs, gb := got.ScoreAndBound(q, row)
-				ws, wb := owned.ScoreAndBound(q, row)
+				gs, gb := got.Scorer(q).ScoreAndBound(row)
+				ws, wb := owned.Scorer(q).ScoreAndBound(row)
 				if gs != ws || gb != wb {
 					t.Fatalf("%s q%d row %d: (%v,%v), want (%v,%v)", metric, qi, row, gs, gb, ws, wb)
 				}
@@ -592,12 +592,12 @@ func bitsEqual(a, b []float32) bool {
 	return slices.EqualFunc(a, b, func(x, y float32) bool { return math.Float32bits(x) == math.Float32bits(y) })
 }
 
-// TestScorerRotatedMatchesScorer: a scorer bound with the query rotated
+// TestBindRotatedMatchesScorer: a scorer bound with the query rotated
 // once and the column's rotated centroid (Rq - Rc) scores and bounds as
 // one that rotates the residual (R(q-c)), up to float rounding, for l2 and
 // cosine; rounding may move a 4-bit query code at its boundary, so a few
 // rows may differ, by little.
-func TestScorerRotatedMatchesScorer(t *testing.T) {
+func TestBindRotatedMatchesScorer(t *testing.T) {
 	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 		vectors := corpus(256, 129)
 		c := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
@@ -606,7 +606,9 @@ func TestScorerRotatedMatchesScorer(t *testing.T) {
 		rows, off := 0, 0
 		for _, qi := range []int{1, 50, 200} {
 			q := NewQuery(vectors[qi], metric, rot)
-			plain, rotated := c.Scorer(q), c.ScorerRotated(q.Rotated(rot), rc)
+			plain := c.Scorer(q)
+			var rotated Scorer
+			rotated.BindRotated(&c, q.Rotated(rot), rc)
 			for row := 0; row < c.Rows(); row++ {
 				ps, pb := plain.ScoreAndBound(row)
 				rs, rb := rotated.ScoreAndBound(row)
@@ -673,7 +675,8 @@ func BenchmarkScorerBind(b *testing.B) {
 	rc := RotateCentroid(c.Code.Centroid, rot)
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = c.ScorerRotated(rq, rc)
+		var s Scorer
+		s.BindRotated(&c, rq, rc)
 	}
 }
 

@@ -378,7 +378,7 @@ func TestCentroidDeltaDropsBySwap(t *testing.T) {
 		t.Fatalf("%d of 5000 rows routed differently from a fresh Build", differ)
 	}
 	// One probe finds the moved centroid: the leaf moved holders with it.
-	if got, _ := applied.Evaluations(next[drop], 1); len(got) != 1 || got[0] != drop {
+	if got, _ := applied.EvaluationsBeam(next[drop], 1, 1); len(got) != 1 || got[0] != drop {
 		t.Fatalf("one probe for the moved centroid found %v, want [%d]", got, drop)
 	}
 	if err := applied.Truncate(k); err == nil {

@@ -24,7 +24,7 @@ import (
 // When want covers every eligible leaf the internal levels are skipped and
 // every eligible leaf ranked, which is the same pool with no internal
 // work. The leaves reached are ranked exactly (in float32, or through the
-// holders' int8 copies with EvaluationsBeamI8's bound when every reached
+// holders' int8 copies with EvaluationsBeamI8Work's bound when every reached
 // holder has one), so only which subtrees the beam dropped can cost recall.
 //
 // Building the eligibility mask is one pass over the tree's node and leaf

@@ -78,10 +78,10 @@ func checkScoreAll(t *testing.T, name string, s Scorer, rows int) {
 	checkLazyBounds(t, name, s, rows)
 }
 
-// A scorer rebound (With) from a packed column to an unpacked one of the
-// same frame and back scores each by its own rows: the tables are the
-// query's, the layout the column's.
-func TestScoreAllAfterWith(t *testing.T) {
+// A scorer moved (Use) from a packed column to an unpacked one of the same
+// frame and back scores each by its own rows: the tables are the query's,
+// the layout the column's.
+func TestScoreAllAfterUse(t *testing.T) {
 	const dims = 128
 	v := corpus(100, dims)
 	c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: NewRotation(3, dims)})
@@ -99,8 +99,10 @@ func TestScoreAllAfterWith(t *testing.T) {
 	c.PackFastScan()
 	s := c.Scorer(NewQuery(v[10], ivfq.L2, rotOf(c)))
 	checkScoreAll(t, "packed", s, 100)
-	checkScoreAll(t, "with unpacked", s.With(&other), 100)
-	checkScoreAll(t, "with packed again", s.With(&other).With(&c), 100)
+	s.Use(&other)
+	checkScoreAll(t, "unpacked", s, 100)
+	s.Use(&c)
+	checkScoreAll(t, "packed again", s, 100)
 }
 
 func BenchmarkScoreAll(b *testing.B) {
@@ -131,7 +133,7 @@ func BenchmarkScoreAll(b *testing.B) {
 	})
 }
 
-// A scorer rebound with BindRotated scores as a fresh ScorerRotated, bit
+// A scorer rebound with BindRotated scores as a freshly bound one, bit
 // for bit, column after column: across widths, after a bind that could
 // not score (wrong metric), and after Use moved it to another column.
 func TestBindRotatedReusesNothingStale(t *testing.T) {
@@ -153,7 +155,8 @@ func TestBindRotatedReusesNothingStale(t *testing.T) {
 			}
 			pq := NewQuery(q, ivfq.L2, rot).Rotated(rot)
 			s.BindRotated(&c, pq, rc)
-			fresh := c.ScorerRotated(pq, rc)
+			var fresh Scorer
+			fresh.BindRotated(&c, pq, rc)
 			name := fmt.Sprintf("dims %d query %d", dims, qi)
 			if allocs := testing.AllocsPerRun(10, func() { s.BindRotated(&c, pq, rc) }); allocs != 0 {
 				t.Fatalf("%s: warmed BindRotated allocated %g times, want 0", name, allocs)

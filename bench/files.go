@@ -104,22 +104,6 @@ func (b *BinReader) Next(n int) ([][]float32, error) {
 // Close closes the file.
 func (b *BinReader) Close() error { return b.f.Close() }
 
-// i8Shift is what i8 storage subtracts from every .u8bin value, base and
-// query alike, to move 0..255 into i8's -128..127. Moving every point by the
-// same vector leaves every l2 distance, and so the ground truth, unchanged;
-// cosine distances would change.
-const i8Shift = 128
-
-// U8ToI8 shifts vectors read from a .u8bin file into i8's range, in place.
-// It preserves l2 distances, not cosine ones.
-func U8ToI8(vecs [][]float32) {
-	for _, v := range vecs {
-		for i := range v {
-			v[i] -= i8Shift
-		}
-	}
-}
-
 // ReadGroundTruth reads a Big ANN .ibin ground truth: (queries, k) then
 // queries×k int32 ids, then queries×k float32 distances (ignored).
 func ReadGroundTruth(path string) ([][]int32, error) {

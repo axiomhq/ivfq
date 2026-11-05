@@ -239,7 +239,7 @@ type Query struct {
 	Sigmas  float64
 	invNorm float64 // 0 for a zero cosine query, which scores 0 everywhere
 	// rotated is the query (unit, for cosine) in Rotation's frame, set by
-	// Rotated: ScorerRotated takes a column's residual as rotated minus the
+	// Rotated: BindRotated takes a column's residual as rotated minus the
 	// column's rotated centroid.
 	rotated []float32
 	// global is the rotated query quantized once (Global), or nil.
@@ -259,7 +259,7 @@ type globalQuery struct {
 
 // Global is q rotated into rot's frame (Rotated) and quantized once to
 // eight bits, for Scorer.BindGlobal: a column then binds in O(1) work
-// beyond one dot product, where Scorer and ScorerRotated quantize the
+// beyond one dot product, where Scorer and BindRotated quantize the
 // query's residual to each column's centroid, O(dims) a column (25 us at
 // 768 dimensions, a third of a lookup's CPU). The query's rounding error,
 // relative to its distance from a column's centroid, is what the bound
@@ -328,11 +328,11 @@ type Scorer struct {
 }
 
 // Scorer prepares q against this column.
-func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q, nil)} }
+func (c *Quantizer) Scorer(q Query) Scorer { return Scorer{bit: c.newBitScorer(q)} }
 
 // Rotated is q bound to rot with the query rotated once: a rotation is
 // linear, so a column's rotated residual R(q-c) is Rq - Rc, and a scorer
-// bound through ScorerRotated with the column's RotateCentroid does
+// bound through BindRotated with the column's RotateCentroid does
 // O(dims) work per column where Scorer rotates the residual of each (a
 // lookup that probes hundreds of small clusters rotated its query
 // hundreds of times).
@@ -356,7 +356,7 @@ func (q Query) Rotated(rot *Rotation) Query {
 	return q
 }
 
-// RotateCentroid is c in rot's frame, what ScorerRotated takes for a
+// RotateCentroid is c in rot's frame, what BindRotated takes for a
 // column encoded against c: compute it once per cluster, not per query.
 func RotateCentroid(c []float32, rot *Rotation) []float32 {
 	v := slices.Clone(c)
@@ -364,40 +364,11 @@ func RotateCentroid(c []float32, rot *Rotation) []float32 {
 	return v
 }
 
-// ScorerRotated is Scorer for a query from Rotated and the column's
-// centroid in the same frame (RotateCentroid), its residual Rq - Rc. It
-// scores as Scorer does, up to float rounding of the residual. A query
-// not from Rotated, or rc of another width, binds as Scorer.
-func (c *Quantizer) ScorerRotated(q Query, rc []float32) Scorer {
-	if q.rotated == nil || len(rc) != c.Dims {
-		rc = nil
-	}
-	return Scorer{bit: c.newBitScorer(q, rc)}
-}
-
-// Rebind is Scorer for a column in the same frame as the one s was built
-// on (same centroid, rotation and metric): the query-side work is reused
-// and only the rows change: a cluster stored as many blocks encoded against
-// one centroid binds the query once per cluster rather than once per
-// block. A column in another frame is bound afresh.
-func (s Scorer) Rebind(c *Quantizer, q Query) Scorer {
-	if s.bit != nil && s.bit.b.sameFrame(c.Code) {
-		return s.With(c)
-	}
-	return c.Scorer(q)
-}
-
-// With is Rebind without the frame check, for a caller that has verified
-// the columns share one frame (SameFrame).
-func (s Scorer) With(c *Quantizer) Scorer {
-	bit := *s.bit
-	bit.b = c.Code
-	return Scorer{bit: &bit}
-}
-
-// BindRotated is s = c.ScorerRotated(q, rc), reusing s's buffers: a
-// worker that binds one hood after another allocates nothing once warm.
-// Scorers copied from s (With) share its buffers and are invalidated.
+// BindRotated binds s to c for a query from Rotated and the column's
+// centroid in the same frame (RotateCentroid), its residual Rq - Rc, reusing
+// s's buffers: a worker that binds one hood after another allocates nothing
+// once warm. It scores as Scorer does, up to float rounding of the residual.
+// A query not from Rotated, or rc of another width, binds as Scorer.
 func (s *Scorer) BindRotated(c *Quantizer, q Query, rc []float32) {
 	if q.rotated == nil || len(rc) != c.Dims {
 		rc = nil
@@ -429,7 +400,9 @@ func (s *Scorer) BindGlobal(c *Quantizer, q Query) bool {
 	return true
 }
 
-// Use is s = s.With(c) in place, without the copy.
+// Use points s at c, a column in the frame s was bound in (SameFrame): a
+// cluster stored as many blocks encoded against one centroid binds the query
+// once per cluster rather than once per block.
 func (s *Scorer) Use(c *Quantizer) { s.bit.b = c.Code }
 
 // SameFrame reports whether o's rows were encoded exactly as c's.
@@ -520,22 +493,6 @@ func (s Scorer) RefineBounds(scores, bounds []float32, cutoff float32, hint Boun
 // Score is ScoreAndBound's estimate alone, bit for bit, without the
 // bound's arithmetic: a probe reads bounds only for its nearest hoods.
 func (s Scorer) Score(row int) float32 { return s.bit.score(row) }
-
-// Score is the one-off form of Scorer.Score: it binds the query for a single
-// row. Tests and oracles use it; the candidate pass does not, because the
-// binding is O(dims).
-func (c Quantizer) Score(q Query, row int) float32 { return c.Scorer(q).Score(row) }
-
-// UpperBound is the one-off form of ScoreAndBound's bound.
-func (c Quantizer) UpperBound(q Query, row int) float32 {
-	_, bound := c.Scorer(q).ScoreAndBound(row)
-	return bound
-}
-
-// ScoreAndBound is the one-off form of Scorer.ScoreAndBound.
-func (c Quantizer) ScoreAndBound(q Query, row int) (score, bound float32) {
-	return c.Scorer(q).ScoreAndBound(row)
-}
 
 // finiteNonnegative is the check every stored scalar of a decoded column
 // has to pass before the candidate pass prunes anything with it.

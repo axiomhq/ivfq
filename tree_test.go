@@ -52,7 +52,7 @@ func TestTreeOracleAndEncoding(t *testing.T) {
 	v := treeData(4096, 16)
 	tree := mustBuild(v, 16)
 	q := append([]float32(nil), v[1234]...)
-	got, n := tree.Evaluations(q, 16)
+	got, n := tree.EvaluationsBeam(q, 16, 16)
 	if !slices.Contains(got, kmeans.Nearest(v, q)) {
 		t.Fatalf("flat nearest absent: %v", got)
 	}
@@ -503,7 +503,7 @@ func TestTreeAssignerAgreesWithFlatOnByteVectors(t *testing.T) {
 		if got := s.Assign(q, 16); got == want {
 			agree++
 		}
-		if probes, _ := tree.Evaluations(q, 16); !slices.Contains(probes, want) {
+		if probes, _ := tree.EvaluationsBeam(q, 16, 16); !slices.Contains(probes, want) {
 			t.Fatalf("exact nearest %d missing from the beam", want)
 		}
 	}
@@ -818,7 +818,7 @@ func BenchmarkTreeClone(b *testing.B) {
 	}
 }
 
-// EvaluationsBeam at beam = probe is Evaluations. Narrower, it evaluates
+// EvaluationsBeam at beam = probe is Nearest. Narrower, it evaluates
 // fewer centroids and still returns probe leaves, nearest first by their
 // exact distance, ties by id.
 func TestEvaluationsBeam(t *testing.T) {
@@ -826,14 +826,14 @@ func TestEvaluationsBeam(t *testing.T) {
 	tree := mustBuild(v, 100)
 	for qi, q := range treeData(30, 16) {
 		const probe = 96
-		want, wantEvals := tree.Evaluations(q, probe)
+		want := tree.Nearest(q, probe)
 		got, gotEvals := tree.EvaluationsBeam(q, probe, probe)
-		if !slices.Equal(got, want) || gotEvals != wantEvals {
-			t.Fatalf("query %d: beam = probe gave %v (%d evals), Evaluations %v (%d)", qi, got, gotEvals, want, wantEvals)
+		if !slices.Equal(got, want) {
+			t.Fatalf("query %d: beam = probe gave %v, Nearest %v", qi, got, want)
 		}
 		narrow, evals := tree.EvaluationsBeam(q, 24, probe)
-		if len(narrow) != probe || evals >= wantEvals {
-			t.Fatalf("query %d: beam 24 gave %d leaves in %d evals, beam %d took %d", qi, len(narrow), evals, probe, wantEvals)
+		if len(narrow) != probe || evals >= gotEvals {
+			t.Fatalf("query %d: beam 24 gave %d leaves in %d evals, beam %d took %d", qi, len(narrow), evals, probe, gotEvals)
 		}
 		d := func(id int) float64 {
 			return float64(Dot(q, q)) + float64(Dot(v[id], v[id])) - 2*float64(Dot(q, v[id]))
@@ -847,7 +847,7 @@ func TestEvaluationsBeam(t *testing.T) {
 	}
 }
 
-// EvaluationsBeamI8 is EvaluationsBeam, leaf for leaf and in order, on
+// EvaluationsBeamI8Work is EvaluationsBeam, leaf for leaf and in order, on
 // every query: widths with an int8 tail, beams from narrow to every
 // holder, a probe past the tree, duplicated leaves (ties by id), a query
 // on a leaf and the zero query; after an Upsert (the int8 copies dropped)
@@ -867,7 +867,8 @@ func TestEvaluationsBeamI8IsEvaluationsBeam(t *testing.T) {
 			for qi, q := range qs {
 				for _, c := range [][2]int{{16, 96}, {4, 50}, {200, 400}, {16, 1}, {16, 5000}} {
 					want, all := tr.EvaluationsBeam(q, c[0], c[1])
-					got, e := tr.EvaluationsBeamI8(q, c[0], c[1])
+					got, w := tr.EvaluationsBeamI8Work(q, c[0], c[1])
+					e := w.Float32
 					if !slices.Equal(got, want) {
 						t.Fatalf("%s dims %d query %d beam %d probe %d:\n got %v\nwant %v", name, dims, qi, c[0], c[1], got, want)
 					}
@@ -905,8 +906,8 @@ func BenchmarkTreeI8(b *testing.B) {
 		b.Run(fmt.Sprintf("i8/%d", dims), func(b *testing.B) {
 			i, e := 0, 0
 			for b.Loop() {
-				_, n := tree.EvaluationsBeamI8(qs[i%64], 16, 128)
-				e += n
+				_, w := tree.EvaluationsBeamI8Work(qs[i%64], 16, 128)
+				e += w.Float32
 				i++
 			}
 			b.ReportMetric(float64(e)/float64(i), "f32evals/op")

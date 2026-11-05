@@ -2,11 +2,11 @@ package simd
 
 import "math"
 
-// RoundI8 is byte(int8(max(-128, min(127, math.Round(x))))) without
+// roundI8 is byte(int8(max(-128, min(127, math.Round(x))))) without
 // math.Round: clamping first leaves a value whose float64 sum with ±0.5 is
 // exact, so truncating it toward zero rounds half away from zero. An
 // integer already in range takes the first branch and is its own rounding.
-func RoundI8(x float32) byte {
+func roundI8(x float32) byte {
 	if i := int32(x); float32(i) == x && i >= -128 && i <= 127 {
 		return byte(int8(i))
 	}
@@ -29,7 +29,7 @@ func DecodeI8(dst []float32, b []byte) {
 // AppendI8 appends each value of v rounded to int8. The vector kernel takes the leading run of
 // eight-lane groups that are all integers — every row of an i8 column,
 // which a rewrite re-encodes — where rounding is the identity and
-// clamping is int8 saturation; RoundI8 takes the rest.
+// clamping is int8 saturation; roundI8 takes the rest.
 func AppendI8(dst []byte, v []float32) []byte {
 	at := len(dst)
 	dst = append(dst, make([]byte, len(v))...)
@@ -39,7 +39,7 @@ func AppendI8(dst []byte, v []float32) []byte {
 		i = encodeI8AVX2(&out[0], &v[0], len(v)&^7)
 	}
 	for ; i < len(v); i++ {
-		out[i] = RoundI8(v[i])
+		out[i] = roundI8(v[i])
 	}
 	return dst
 }

@@ -61,16 +61,16 @@ func TestFilteredNearestCoversSmallSubset(t *testing.T) {
 					if !slices.Equal(got, want) {
 						t.Fatalf("dims %d n %d query %d probe %d:\n got %v\nwant %v", dims, n, qi, probe, got, want)
 					}
-					if work.Total() > 2*n || dims < 256 && (work.Quantized != 0 || work.Float32 != n) || dims >= 256 && work.Quantized != n {
+					if work.Float32+work.Quantized > 2*n || dims < 256 && (work.Quantized != 0 || work.Float32 != n) || dims >= 256 && work.Quantized != n {
 						t.Fatalf("dims %d n %d probe %d: work %+v, want only the %d eligible leaves", dims, n, probe, work, n)
 					}
 				}
 			}
 		}
-		if got, work := tree.FilteredNearest(v[0], nil, 16, 5); got != nil || work.Total() != 0 {
+		if got, work := tree.FilteredNearest(v[0], nil, 16, 5); got != nil || work != (TreeWork{}) {
 			t.Fatalf("no eligible leaves: %v %+v", got, work)
 		}
-		if got, work := tree.FilteredNearest(v[0], []int{-3, len(v)}, 16, 5); got != nil || work.Total() != 0 {
+		if got, work := tree.FilteredNearest(v[0], []int{-3, len(v)}, 16, 5); got != nil || work != (TreeWork{}) {
 			t.Fatalf("only junk eligible: %v %+v", got, work)
 		}
 	}
@@ -179,10 +179,10 @@ func TestFilteredNearestLargeTreeBounded(t *testing.T) {
 					if dims < 256 {
 						leafWork = work.Float32 - min(work.Float32, internal)
 					}
-					if leafWork > len(eligible) || work.Total() > internal+2*len(eligible) {
+					if leafWork > len(eligible) || work.Float32+work.Quantized > internal+2*len(eligible) {
 						t.Fatalf("%s query %d: work %+v, %d eligible, %d internal", name, qi, work, len(eligible), internal)
 					}
-					maxWork = max(maxWork, work.Total())
+					maxWork = max(maxWork, work.Float32+work.Quantized)
 				}
 				recall /= float64(len(qs))
 				t.Logf("%s: %d eligible, recall@%d %.4f, max centroid work %d of %d leaves", name, len(eligible), probe, recall, maxWork, leaves)
@@ -221,18 +221,17 @@ func TestFilteredNearestAllEligible(t *testing.T) {
 	}
 }
 
-// EvaluationsBeamI8Work names EvaluationsBeamI8's leaves and float32
-// count, and counts every int8 distance of the leaves it scanned.
+// EvaluationsBeamI8Work names EvaluationsBeam's leaves, counts no more
+// float32 distances, and counts every int8 distance of the leaves it scanned.
 func TestEvaluationsBeamI8Work(t *testing.T) {
 	v := treeData(3000, 256)
 	tree := mustBuild(v, 100)
 	tree.QuantizeI8()
 	for _, q := range treeData(8, 256) {
-		ids, e := tree.EvaluationsBeamI8(q, 16, 96)
-		ids2, work := tree.EvaluationsBeamI8Work(q, 16, 96)
-		_, all := tree.EvaluationsBeam(q, 16, 96)
-		if !slices.Equal(ids, ids2) || work.Float32 != e || work.Quantized == 0 {
-			t.Fatalf("work %+v, EvaluationsBeamI8 %d", work, e)
+		ids, work := tree.EvaluationsBeamI8Work(q, 16, 96)
+		want, all := tree.EvaluationsBeam(q, 16, 96)
+		if !slices.Equal(ids, want) || work.Float32 > all || work.Quantized == 0 {
+			t.Fatalf("work %+v, EvaluationsBeam %d", work, all)
 		}
 		// Every leaf the float32 search scanned was scored in int8.
 		w := workspaces.Get().(*treeWorkspace)

@@ -198,10 +198,8 @@ func (t Tree) Nearest(q []float32, probe int) []int {
 	return ids
 }
 
-// Evaluations is Nearest with the number of centroid distance evaluations.
-func (t Tree) Evaluations(q []float32, probe int) ([]int, int) { return t.nearestBeam(q, probe, probe) }
-
-// EvaluationsBeam is Evaluations with the beam set apart from probe: the
+// EvaluationsBeam is Nearest with the number of centroid distance
+// evaluations and the beam set apart from probe (Nearest's beam is probe): the
 // search keeps beam nodes per level and ranks every leaf under them, so a
 // beam of probe scans every leaf once probe exceeds the root's fanout.
 // Leaves are ranked exactly; a narrower beam can only miss a leaf under a
@@ -269,7 +267,7 @@ type treeWorkspace struct {
 	active, holders []int
 	next, best      []rankedNode
 	dots            []float32
-	// EvaluationsBeamI8's: the int8 query, a holder's int8 dot products,
+	// EvaluationsBeamI8Work's: the int8 query, a holder's int8 dot products,
 	// and per scanned leaf its bound and float32 norm; its result.
 	q8    []int8
 	dots8 []int32
@@ -346,7 +344,7 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 
 // TwoStageNearest is TwoStageAssign's search with the picked leaf ids,
 // nearest first, and the number of centroid distance evaluations returned —
-// the pairing Nearest and Evaluations give the beam search.
+// the pairing EvaluationsBeam gives the beam search.
 func (t Tree) TwoStageNearest(q []float32, top int) ([]int, int) {
 	if t.root < 0 || top <= 0 || len(q) != t.dims {
 		return nil, 0

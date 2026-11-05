@@ -74,14 +74,6 @@ func TestBinReader(t *testing.T) {
 	}
 }
 
-func TestU8ToI8(t *testing.T) {
-	vecs := [][]float32{{0, 128, 255}}
-	U8ToI8(vecs)
-	if !reflect.DeepEqual(vecs, [][]float32{{-128, 0, 127}}) {
-		t.Fatalf("got %v", vecs)
-	}
-}
-
 func TestReadGroundTruth(t *testing.T) {
 	// 2 queries × 3 ids, then 2×3 distances the reader ignores.
 	p := writeBin(t, "gt.ibin", 2, 3, []int32{1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0})

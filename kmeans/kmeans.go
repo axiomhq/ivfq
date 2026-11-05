@@ -40,9 +40,9 @@ const minSample = 4096
 // and the only pass that touches all N vectors is one assignment.
 func SampleSize(k int) int { return max(minSample, trainFactor*max(1, k)) }
 
-// SampleSizeForBudget additionally caps the training vectors by their raw
+// sampleSizeForBudget additionally caps the training vectors by their raw
 // float32 footprint. It never returns zero for a non-empty build.
-func SampleSizeForBudget(k, dims, bytes int) int {
+func sampleSizeForBudget(k, dims, bytes int) int {
 	if dims <= 0 || bytes <= 0 {
 		return SampleSize(k)
 	}
@@ -100,7 +100,7 @@ func (c Config) Fit(ctx context.Context, vecs [][]float32) ([][]float32, []int, 
 	if k > n {
 		k = n
 	}
-	s := SampleSizeForBudget(k, len(vecs[0]), bytes)
+	s := sampleSizeForBudget(k, len(vecs[0]), bytes)
 	if k > TwoLevelK {
 		return fitTwoLevel(ctx, vecs, s, k, iters, seed, spherical)
 	}
