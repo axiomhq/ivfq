@@ -9,10 +9,12 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"unicode/utf8"
 )
 
-// Vector is the string-keyed sparse vector: sorted, unique Keys with
-// finite Values. Its JSON form is an object of key to weight.
+// Vector is the string-keyed sparse vector: sorted, unique, valid UTF-8
+// Keys with finite Values. Its JSON form is an object of key to weight;
+// JSON null leaves a Vector unchanged.
 type Vector struct {
 	Keys   []string
 	Values []float32
@@ -30,6 +32,9 @@ func (v Vector) MarshalJSON() ([]byte, error) {
 }
 
 func (v *Vector) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(data, &object); err != nil {
 		return err
@@ -51,8 +56,9 @@ func (v *Vector) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Validate checks equal lengths, finite values, and sorted unique keys. It
-// sets no cap on the number of keys; callers enforce their own.
+// Validate checks equal lengths, finite values, and sorted, unique, valid
+// UTF-8 keys; JSON cannot carry other keys. It sets no cap on the number of
+// keys; callers enforce their own.
 func (v Vector) Validate() error {
 	if len(v.Keys) != len(v.Values) {
 		return errors.New("sparse vector keys and values must have equal length")
@@ -63,6 +69,9 @@ func (v Vector) Validate() error {
 		}
 		if i > 0 && v.Keys[i-1] >= v.Keys[i] {
 			return errors.New("sparse vector keys must be sorted and unique")
+		}
+		if !utf8.ValidString(v.Keys[i]) {
+			return errors.New("sparse vector keys must be valid UTF-8")
 		}
 	}
 	return nil

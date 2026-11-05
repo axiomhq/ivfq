@@ -28,6 +28,11 @@ func TestSparseStringKeys(t *testing.T) {
 	if err := json.Unmarshal(encoded, &object); err != nil || len(object) != 7 || object["猫"] != 6 || object["dim01"] != 5 {
 		t.Fatalf("string-key roundtrip = %s (%v)", encoded, err)
 	}
+	// null keeps the vector, as encoding/json does for other types.
+	kept := a
+	if err := json.Unmarshal([]byte(`null`), &a); err != nil || len(a.Keys) != len(kept.Keys) {
+		t.Fatalf("null changed the vector to %+v (%v)", a, err)
+	}
 	for _, raw := range []string{`{"apple":null}`, `{"apple":"two"}`, `{"apple":1e100}`, `{"apple":[1]}`, `[]`, `{"indices":null,"apple":1}`, `{"indices":[1],"values":[2]}`} {
 		if err := json.Unmarshal([]byte(raw), &a); err == nil {
 			t.Fatalf("accepted %s", raw)
@@ -47,9 +52,13 @@ func TestSparseVectorValidation(t *testing.T) {
 		{Keys: []string{"b", "a"}, Values: []float32{1, 2}},
 		{Keys: []string{"a"}, Values: []float32{float32(math.NaN())}},
 		{Keys: []string{"a"}, Values: []float32{float32(math.Inf(1))}},
+		{Keys: []string{"\xfe", "\xff"}, Values: []float32{1, 2}}, // JSON would merge them into one U+FFFD key
 	} {
 		if err := v.Validate(); err == nil {
 			t.Fatalf("accepted invalid sparse vector %+v", v)
+		}
+		if _, err := json.Marshal(v); err == nil {
+			t.Fatalf("marshalled invalid sparse vector %+v", v)
 		}
 	}
 	if err := (Vector{}).Validate(); err != nil {
