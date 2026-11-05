@@ -32,7 +32,7 @@ import (
 // leaves no holder owns (Upsert/Truncate can leave some) are never
 // returned; duplicates count once.
 func (t Tree) FilteredNearest(q []float32, eligible []int, beam, probe int) ([]int, TreeWork) {
-	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims || len(eligible) == 0 {
+	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims || len(eligible) == 0 {
 		return nil, TreeWork{}
 	}
 	w := filterWorkspaces.Get().(*filterWorkspace)

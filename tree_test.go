@@ -338,6 +338,9 @@ func TestUnmarshalTreeRejectsCorrupt(t *testing.T) {
 		"leaf count overflow": {hdr - 8, 1 << 31},
 		"node count overflow": {hdr - 4, 1 << 31},
 		"dims overflow":       {4, 1 << 30},
+		"fanout past int32":   {8, 1 << 31}, // negative on 32-bit
+		"NaN leaf":            {hdr, 0x7fc00000},
+		"NaN node":            {hdr + 3*vec, 0x7fc00000},
 		"child out of range":  {rootChild, 99},
 		"leaf out of range":   {leaf, 99},
 		"cycle to root":       {rootChild, 0},
@@ -702,6 +705,25 @@ func TestTreeUpsertErrors(t *testing.T) {
 	if err := empty.Upsert(0, []float32{float32(math.NaN()), 1}); err == nil || empty.Dims() != 0 {
 		t.Fatalf("an empty tree took a rejected vector: err %v, dims %d", err, empty.Dims())
 	}
+	// Build holds its centroids to Upsert's rule, and to one width.
+	for name, cs := range map[string][][]float32{
+		"NaN":    {{0, 0}, {float32(math.NaN()), 1}, {1, 1}},
+		"3e19":   {{0, 0}, {3e19, 1}, {1, 1}},
+		"ragged": {{0, 0}, {1}, {1, 1}},
+	} {
+		if _, err := Build(context.Background(), cs, 2); err == nil {
+			t.Fatalf("Build accepted a %s centroid", name)
+		}
+	}
+	// Finite centroids whose distance to a finite vector overflows float32
+	// still leave the vector a holder to join.
+	far := mustBuild([][]float32{{1.5e19, 0}, {0, 1.5e19}}, 2)
+	if err := far.Upsert(2, []float32{-1.5e19, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalTree(mustBytes(far)); err != nil {
+		t.Fatalf("tree after an overflowing append: %v", err)
+	}
 }
 
 // TestTreeUpsertEmptyTree: an empty tree adopts the first upserted vector's
@@ -727,6 +749,19 @@ func TestTreeUpsertEmptyTree(t *testing.T) {
 	}
 	if got := empty.Nearest([]float32{3, 2, 1}, 1); !reflect.DeepEqual(got, []int{1}) {
 		t.Fatalf("second leaf not nearest to itself: %v", got)
+	}
+
+	// The zero value and a zero-dimensional tree search and round-trip.
+	var none Tree
+	if got := none.Nearest(nil, 4); len(got) != 0 {
+		t.Fatalf("zero-value tree found %v", got)
+	}
+	if _, err := UnmarshalTree(mustBytes(none)); err != nil {
+		t.Fatalf("zero-value tree does not round-trip: %v", err)
+	}
+	flat := mustBuild([][]float32{{}, {}, {}}, 2)
+	if got := flat.Nearest([]float32{}, 2); len(got) != 2 {
+		t.Fatalf("zero-dimensional tree found %v", got)
 	}
 
 	var zero Tree

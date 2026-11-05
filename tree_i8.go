@@ -22,7 +22,7 @@ type nodeI8 struct {
 // QuantizeI8 gives every leaf holder an int8 copy of its leaves for
 // EvaluationsBeamI8Work: a quarter of the bytes the leaf scan reads, which at
 // 768 dimensions was 12.7 MB a query. It is derived, never serialized, and
-// dropped by any change to the tree (Upsert, Truncate), after which
+// dropped by Clone and by any change to the tree (Upsert, Truncate), after which
 // EvaluationsBeamI8Work reads the float32 leaves until QuantizeI8 runs again.
 // It writes t, so call it before t is shared.
 func (t *Tree) QuantizeI8() {
@@ -112,7 +112,7 @@ type TreeWork struct {
 // both kinds of distance. A tree without its int8 copies (not quantized,
 // or changed since) is searched by EvaluationsBeam.
 func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWork) {
-	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
+	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
 		return nil, TreeWork{}
 	}
 	w := workspaces.Get().(*treeWorkspace)

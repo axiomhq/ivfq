@@ -41,14 +41,23 @@ type Tree struct {
 }
 
 // Build constructs a fanout-ary hierarchy. Its fixed seeds make identical
-// inputs deterministic; fanout values below two are promoted to two. A
-// cancelled ctx returns its error and no tree.
+// inputs deterministic; fanout values below two are promoted to two. Every
+// centroid must have the first one's length and a finite squared norm, as
+// Upsert requires, or Build returns an error. A cancelled ctx returns its error and no tree.
 func Build(ctx context.Context, centroids [][]float32, fanout int) (Tree, error) {
 	t := Tree{fanout: max(2, fanout), root: -1, leaves: centroids}
 	if len(centroids) == 0 {
 		return t, nil
 	}
 	t.dims = len(centroids[0])
+	for i, c := range centroids {
+		if len(c) != t.dims {
+			return Tree{}, fmt.Errorf("ivfq: centroid %d is %d-dimensional, want %d", i, len(c), t.dims)
+		}
+		if n, ok := finiteNorm(c); !ok {
+			return Tree{}, fmt.Errorf("ivfq: centroid %d has squared norm %v", i, n)
+		}
+	}
 	ids := make([]int, len(centroids))
 	for i := range ids {
 		ids[i] = i
@@ -67,7 +76,7 @@ func Build(ctx context.Context, centroids [][]float32, fanout int) (Tree, error)
 // stays one copy of the leaves plus the internal centroids, close to its
 // serialized size, which is what the object cache charges for it.
 func (t *Tree) index() {
-	if t.dims == 0 || len(t.nodes) == 0 {
+	if len(t.nodes) == 0 {
 		return
 	}
 	arena := make([]float32, 0, len(t.leaves)*t.dims)
@@ -200,8 +209,8 @@ func (t Tree) Nearest(q []float32, probe int) []int {
 
 // EvaluationsBeam is Nearest with the number of centroid distance
 // evaluations and the beam set apart from probe (Nearest's beam is probe): the
-// search keeps beam nodes per level and ranks every leaf under them, so a
-// beam of probe scans every leaf once probe exceeds the root's fanout.
+// search keeps beam nodes per level and ranks every leaf under them, so it
+// scans every leaf only once beam covers every level's width.
 // Leaves are ranked exactly; a narrower beam can only miss a leaf under a
 // node it dropped. beam may be smaller than probe, and the result is still
 // the probe nearest leaves the beam reached.
@@ -289,7 +298,7 @@ func (w *treeWorkspace) dotsOf(q, block []float32, n int) []float32 {
 }
 
 func (t Tree) nearestBeam(q []float32, beam, probe int) ([]int, int) {
-	if t.root < 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
+	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
 	w := workspaces.Get().(*treeWorkspace)
@@ -304,7 +313,7 @@ func (t Tree) nearestBeam(q []float32, beam, probe int) ([]int, int) {
 var workspaces = sync.Pool{New: func() any { return new(treeWorkspace) }}
 
 func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]rankedNode, int) {
-	if t.root < 0 || beam <= 0 || count <= 0 || len(q) != t.dims {
+	if len(t.nodes) == 0 || beam <= 0 || count <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
 	qq := Dot(q, q)
@@ -346,7 +355,7 @@ func (t Tree) nearestInto(w *treeWorkspace, q []float32, beam, count int) ([]ran
 // nearest first, and the number of centroid distance evaluations returned —
 // the pairing EvaluationsBeam gives the beam search.
 func (t Tree) TwoStageNearest(q []float32, top int) ([]int, int) {
-	if t.root < 0 || top <= 0 || len(q) != t.dims {
+	if len(t.nodes) == 0 || top <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
 	var w treeWorkspace
@@ -360,7 +369,7 @@ func (t Tree) TwoStageNearest(q []float32, top int) ([]int, int) {
 // holder under each pick. Each stage's ranking is exact, so the only
 // approximation is which subtrees stage two opens.
 func (t Tree) twoStageInto(w *treeWorkspace, q []float32, top, count int) ([]rankedNode, int) {
-	if t.root < 0 || top <= 0 || count <= 0 || len(q) != t.dims {
+	if len(t.nodes) == 0 || top <= 0 || count <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
 	qq := Dot(q, q)
@@ -527,10 +536,14 @@ func (t Tree) Leaf(id int) []float32 { return t.leaves[id] }
 func (t Tree) MarshalBinary() ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteString("DVT\x01")
-	binary.Write(&b, binary.LittleEndian, []uint32{uint32(t.dims), uint32(t.fanout), uint32(t.root + 1), uint32(t.height), uint32(len(t.leaves)), uint32(len(t.nodes))})
+	root := uint32(0) // no nodes: the zero Tree has root 0, not -1
+	if len(t.nodes) > 0 {
+		root = uint32(t.root + 1)
+	}
+	binary.Write(&b, binary.LittleEndian, []uint32{uint32(t.dims), uint32(t.fanout), root, uint32(t.height), uint32(len(t.leaves)), uint32(len(t.nodes))})
 	for _, v := range t.leaves {
 		if len(v) != t.dims {
-			return nil, errors.New("ivf: mixed dimensions")
+			return nil, errors.New("ivfq: mixed dimensions")
 		}
 		binary.Write(&b, binary.LittleEndian, v)
 	}
@@ -556,13 +569,17 @@ func (t Tree) MarshalBinary() ([]byte, error) {
 // referenced by exactly one parent, every leaf owned by one node, and no
 // node both branches and holds leaves.
 func UnmarshalTree(data []byte) (Tree, error) {
-	corrupt := errors.New("ivf: invalid tree encoding")
+	corrupt := errors.New("ivfq: invalid tree encoding")
 	if len(data) < 28 || string(data[:4]) != "DVT\x01" {
 		return Tree{}, corrupt
 	}
 	r := bytes.NewReader(data[4:])
 	var h [6]uint32
 	binary.Read(r, binary.LittleEndian, &h) // cannot fail: the length check covers the header
+	// Fields that become ints must be positive ints on 32-bit builds too.
+	if h[0] > math.MaxInt32 || h[1] > math.MaxInt32 || h[3] > math.MaxInt32 {
+		return Tree{}, corrupt
+	}
 	dims, nLeaves, nNodes := uint64(h[0]), uint64(h[4]), uint64(h[5])
 	rem := uint64(r.Len())
 	// Minimum footprint, independent of dims (zero-dimensional vectors are
@@ -579,7 +596,7 @@ func UnmarshalTree(data []byte) (Tree, error) {
 	readVec := func() ([]float32, error) {
 		v := make([]float32, t.dims)
 		if binary.Read(r, binary.LittleEndian, v) != nil {
-			return nil, errors.New("ivf: truncated tree")
+			return nil, errors.New("ivfq: truncated tree")
 		}
 		return v, nil
 	}
@@ -587,6 +604,9 @@ func UnmarshalTree(data []byte) (Tree, error) {
 		v, e := readVec()
 		if e != nil {
 			return Tree{}, e
+		}
+		if _, ok := finiteNorm(v); !ok {
+			return Tree{}, corrupt
 		}
 		t.leaves[i] = v
 	}
@@ -597,10 +617,13 @@ func UnmarshalTree(data []byte) (Tree, error) {
 		if e != nil {
 			return Tree{}, e
 		}
+		if _, ok := finiteNorm(v); !ok {
+			return Tree{}, corrupt
+		}
 		t.nodes[i].centroid = v
 		var nc, nl uint32
 		if binary.Read(r, binary.LittleEndian, &nc) != nil || binary.Read(r, binary.LittleEndian, &nl) != nil {
-			return Tree{}, errors.New("ivf: truncated tree")
+			return Tree{}, errors.New("ivfq: truncated tree")
 		}
 		// A node is internal or a leaf holder, never both: nearest descends
 		// children and ignores a mixed node's leaves, hiding them from search.
@@ -612,7 +635,7 @@ func UnmarshalTree(data []byte) (Tree, error) {
 		for j := range t.nodes[i].children {
 			var x uint32
 			if binary.Read(r, binary.LittleEndian, &x) != nil {
-				return Tree{}, errors.New("ivf: truncated tree")
+				return Tree{}, errors.New("ivfq: truncated tree")
 			}
 			if uint64(x) >= nNodes || int(x) <= i || parented[x] {
 				return Tree{}, corrupt
@@ -624,7 +647,7 @@ func UnmarshalTree(data []byte) (Tree, error) {
 		for j := range t.nodes[i].leaves {
 			var x uint32
 			if binary.Read(r, binary.LittleEndian, &x) != nil {
-				return Tree{}, errors.New("ivf: truncated tree")
+				return Tree{}, errors.New("ivfq: truncated tree")
 			}
 			if uint64(x) >= nLeaves || owned[x] {
 				return Tree{}, corrupt
@@ -704,10 +727,8 @@ func (t Tree) Clone() Tree {
 // holder, so correctness holds and quality degrades slowly; rebuild once
 // enough upserts have accumulated.
 func (t *Tree) Upsert(id int, v []float32) error {
-	// The search ranks by the squared norm: NaN or Inf there (a non-finite
-	// coordinate, or one past about 1.8e19) ranks no holder nearest.
-	if n := float64(Dot(v, v)); math.IsNaN(n) || math.IsInf(n, 0) {
-		return fmt.Errorf("ivf: upsert of a vector whose squared norm is %v", n)
+	if n, ok := finiteNorm(v); !ok {
+		return fmt.Errorf("ivfq: upsert of a vector whose squared norm is %v", n)
 	}
 	t.dropI8()
 	if len(t.nodes) == 0 && len(t.leaves) == 0 {
@@ -717,13 +738,13 @@ func (t *Tree) Upsert(id int, v []float32) error {
 		t.fanout = max(t.fanout, 2)
 		t.root = -1
 	} else if len(v) != t.dims {
-		return fmt.Errorf("ivf: upsert of a %d-dimensional vector into a %d-dimensional tree", len(v), t.dims)
+		return fmt.Errorf("ivfq: upsert of a %d-dimensional vector into a %d-dimensional tree", len(v), t.dims)
 	}
 	if id < 0 {
-		return fmt.Errorf("ivf: negative leaf id %d", id)
+		return fmt.Errorf("ivfq: negative leaf id %d", id)
 	}
 	if id > len(t.leaves) {
-		return fmt.Errorf("ivf: leaf id %d beyond %d leaves: appends must be contiguous", id, len(t.leaves))
+		return fmt.Errorf("ivfq: leaf id %d beyond %d leaves: appends must be contiguous", id, len(t.leaves))
 	}
 	if id < len(t.leaves) {
 		t.replace(id, v)
@@ -739,7 +760,7 @@ func (t *Tree) Upsert(id int, v []float32) error {
 func (t *Tree) Truncate(n int) error {
 	t.dropI8()
 	if n < 0 || n > len(t.leaves) {
-		return fmt.Errorf("ivf: truncate to %d of %d leaves", n, len(t.leaves))
+		return fmt.Errorf("ivfq: truncate to %d of %d leaves", n, len(t.leaves))
 	}
 	for id := len(t.leaves) - 1; id >= n; id-- {
 		t.detach(id)
@@ -830,6 +851,14 @@ func (t *Tree) appendLeaf(v []float32) {
 	t.extendBlock(n, v)
 }
 
+// finiteNorm returns v's squared norm and whether it is finite. Every
+// distance the search ranks by is built from it, so NaN or Inf there (a
+// non-finite coordinate, or one past about 1.8e19) ranks nothing nearest.
+func finiteNorm(v []float32) (float64, bool) {
+	n := float64(Dot(v, v))
+	return n, !math.IsNaN(n) && !math.IsInf(n, 0)
+}
+
 // nearestHolder descends the hierarchy the way nearestInto does — same
 // scan-by-norm-identity ranking, same selectNearest beam, beam = fanout —
 // but keeps the visited leaf holders instead of their leaves, and returns
@@ -837,7 +866,7 @@ func (t *Tree) appendLeaf(v []float32) {
 // empty tree). Upsert appends place new leaves with it; nothing else
 // exposes it.
 func (t Tree) nearestHolder(q []float32) int {
-	if t.root < 0 || len(q) != t.dims {
+	if len(t.nodes) == 0 || len(q) != t.dims {
 		return -1
 	}
 	beam := max(t.fanout, 2)
@@ -872,7 +901,9 @@ func (t Tree) nearestHolder(q []float32) int {
 	for _, id := range w.holders {
 		c := t.nodes[id].centroid
 		d := float32(float64(qq) + float64(Dot(c, c)) - 2*float64(Dot(q, c)))
-		if d < bestD || d == bestD && id < bestID { // nearer first, ties by id
+		// nearer first, ties by id; the first holder is taken even when
+		// its distance overflows to +Inf, so a non-empty tree always has one
+		if bestID < 0 || d < bestD || d == bestD && id < bestID {
 			bestID, bestD = id, d
 		}
 	}

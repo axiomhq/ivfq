@@ -67,7 +67,7 @@ Splits and merges keep the clusters at their size as rows arrive: a split
 is `kmeans.Config{K: 2, Iters: kmeans.SplitIters}.FitBalanced`, which keeps
 each child at least a quarter of the parent, and `Policy`,
 `MergeTargets`, `SplitAbove` and `MergeBelow` decide when, reading only
-per-cluster counts and radii. No rule ever touches every row.
+per-cluster counts, radii and centroids. No rule ever touches every row.
 
 ## Rank
 
@@ -93,9 +93,10 @@ test that pins it to that reference; amd64 picks the kernel at run time from
 `golang.org/x/sys/cpu`, and every other architecture runs the reference.
 
 `Dot`, `L2Sq` and `CosineSim` keep several float32 accumulator lanes, so they
-can differ from a float64 loop by about 1e-7 relative. Rankings do not change,
-but centroids are only reproducible against a fixed kernel: treat a kernel
-change like a seed change.
+can differ from a float64 loop by about 1e-7 relative. That can reorder near
+ties, and a narrow beam that breaks a tie differently reaches different
+leaves, so rankings and centroids are only reproducible against a fixed
+kernel: treat a kernel change like a seed change.
 
 ## Benchmark
 

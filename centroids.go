@@ -190,7 +190,9 @@ func CentroidDelta(prev, next [][]float32, limit int) ([]CentroidUpsert, bool) {
 	return out, true
 }
 
-// ApplyCentroidDeltas upserts deltas, oldest first, into t in place.
+// ApplyCentroidDeltas upserts deltas, oldest first, into t in place. An
+// error leaves t with the entries before it applied, so apply to a Clone
+// when t must survive a bad delta.
 func (t *Tree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
 	for _, d := range deltas {
 		for _, e := range d {
