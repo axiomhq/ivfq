@@ -7,7 +7,11 @@ import "math"
 // terms in dimension order, exactly as a scalar loop over that row would. The
 // query kernels sum in four interleaved lanes, combined (l0+l2)+(l1+l3), with
 // the tail after; the Go references use the same order, so a result does not
-// depend on the CPU.
+// depend on the CPU. No quant kernel fuses a multiply into an add, so the
+// references round every product with an explicit float64 conversion, which
+// stops the compiler fusing them (it does on arm64 and GOAMD64=v3). The
+// squares of a float32 are exact in float64 and need it only for uniformity;
+// the products in QuantCodes do need it.
 
 // BlockSumSq adds, for each of the FillBlock rows r, the squares of its
 // first dims values to sums[r] (float64 of each float32, in dimension order).
@@ -21,7 +25,7 @@ func BlockSumSq(block []float32, dims int, sums *[FillBlock]float64) {
 	for j := 0; j < dims; j++ {
 		for r, v := range block[j*FillBlock:][:FillBlock] {
 			x := float64(v)
-			sums[r] += x * x
+			sums[r] += float64(x * x)
 		}
 	}
 }
@@ -89,13 +93,13 @@ func SumSq(x []float32) float64 {
 		var l [4]float64
 		for j := 0; j < n4; j++ {
 			f := float64(x[j])
-			l[j&3] += f * f
+			l[j&3] += float64(f * f)
 		}
 		s = (l[0] + l[2]) + (l[1] + l[3])
 	}
 	for _, v := range x[n4:] {
 		f := float64(v)
-		s += f * f
+		s += float64(f * f)
 	}
 	return s
 }
@@ -113,15 +117,15 @@ func QuantCodes(codes []byte, x []float32, mul, lo, delta float64, levels int) f
 	} else {
 		var l [4]float64
 		for j := 0; j < n4; j++ {
-			c, e := quantOne(float64(x[j])*mul, lo, delta, levels)
-			codes[j], l[j&3] = c, l[j&3]+e*e
+			c, e := quantOne(float64(float64(x[j])*mul), lo, delta, levels)
+			codes[j], l[j&3] = c, l[j&3]+float64(e*e)
 		}
 		s = (l[0] + l[2]) + (l[1] + l[3])
 	}
 	for j := n4; j < len(x); j++ {
-		c, e := quantOne(float64(x[j])*mul, lo, delta, levels)
+		c, e := quantOne(float64(float64(x[j])*mul), lo, delta, levels)
 		codes[j] = c
-		s += e * e
+		s += float64(e * e)
 	}
 	return s
 }
@@ -135,5 +139,5 @@ func quantOne(x, lo, delta float64, levels int) (code byte, err float64) {
 		t++
 	}
 	t = min(float64(levels), max(0, t))
-	return byte(t), lo + delta*t - x
+	return byte(t), lo + float64(delta*t) - x
 }

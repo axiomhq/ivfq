@@ -10,14 +10,14 @@ import (
 // the extremes of int8 (-128 · -128 in every lane).
 func TestDotsI8MatchesGeneric(t *testing.T) {
 	// Every kernel the CPU has: the AVX-512 VNNI one, then AVX2 alone.
+	old := hasVNNI
+	defer func() { hasVNNI = old }()
 	for _, vnni := range []bool{true, false} {
-		if vnni && !hasVNNI {
+		if vnni && !old {
 			continue
 		}
-		old := hasVNNI
 		hasVNNI = vnni
 		testDotsI8(t)
-		hasVNNI = old
 	}
 }
 

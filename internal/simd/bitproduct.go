@@ -12,6 +12,7 @@ import (
 // planes back to back, len(row) words each.
 func BitProductWords(row, planes []uint64) (ones, weighted uint64) {
 	if hasAVX2POPCNT && len(row) > 0 {
+		_ = planes[:4*len(row)]
 		return bitProductAVX2((*byte)(unsafe.Pointer(&row[0])), &planes[0], len(row))
 	}
 	return bitProductGeneric(row, planes)
@@ -22,7 +23,7 @@ func BitProductWords(row, planes []uint64) (ones, weighted uint64) {
 // amd64 is little-endian and the kernel loads unaligned.
 func BitProductBytes(row []byte, planes []uint64, words int) (ones, weighted uint64) {
 	if hasAVX2POPCNT && words > 0 {
-		_ = row[:8*words]
+		_, _ = row[8*words-1], planes[:4*words]
 		return bitProductAVX2(&row[0], &planes[0], words)
 	}
 	return bitProductGenericBytes(row, planes, words)

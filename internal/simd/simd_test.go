@@ -25,8 +25,9 @@ func TestNormalizeTiny(t *testing.T) {
 // the AVX-512 kernels and without.
 func TestF32Kernels(t *testing.T) {
 	r := rand.New(rand.NewPCG(9, 10))
+	old := hasAVX512F
+	defer func() { hasAVX512F = old }()
 	for _, on := range []bool{true, false} {
-		old := hasAVX512F
 		hasAVX512F = old && on
 		for _, n := range []int{1, 2, 15, 16, 17, 31, 48, 63, 64, 65, 79, 80, 128, 129, 255, 256, 257, 768, 1537} {
 			a, b := make([]float32, n), make([]float32, n)
@@ -43,6 +44,51 @@ func TestF32Kernels(t *testing.T) {
 				t.Fatalf("avx512=%v n=%d: L2Sq %v, want %v", hasAVX512F, n, got, l2)
 			}
 		}
-		hasAVX512F = old
+	}
+}
+
+// A broken length precondition panics with and without the vector kernels,
+// instead of reading or writing outside the slices. The short slices keep
+// spare capacity, which a slice-expression guard would accept.
+func TestShapeMismatchPanics(t *testing.T) {
+	old := hasAVX512F
+	defer func() { hasAVX512F = old }()
+	for _, on := range []bool{true, false} {
+		hasAVX512F = old && on
+		for name, f := range map[string]func(){
+			"Dot":             func() { Dot(make([]float32, 16), make([]float32, 17)) },
+			"L2Sq":            func() { L2Sq(make([]float32, 16), make([]float32, 17)) },
+			"FWHT":            func() { FWHT(make([]float32, 24)) },
+			"FWHTRows":        func() { FWHTRows(make([]float32, 3*FillBlock), 3) },
+			"DecodeI8":        func() { DecodeI8(make([]float32, 16), make([]byte, 8, 16)) },
+			"BitProductBytes": func() { BitProductBytes(make([]byte, 8, 16), make([]uint64, 8), 2) },
+		} {
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Errorf("avx512=%v: %s with a bad shape did not panic", hasAVX512F, name)
+					}
+				}()
+				f()
+			}()
+		}
+	}
+}
+
+// CosineSim scores 0, never NaN or ±Inf, when a norm is 0, underflows or
+// overflows float32.
+func TestCosineSimDegenerate(t *testing.T) {
+	for _, c := range []struct{ a, b []float32 }{
+		{[]float32{0, 0}, []float32{1, 0}},
+		{[]float32{1e-30, 0}, []float32{1, 0}},
+		{[]float32{1e20, 1e20}, []float32{1e20, 1e20}},
+		{[]float32{1e20, 1e20}, []float32{1, 1}},
+	} {
+		if got := CosineSim(c.a, c.b); got != 0 {
+			t.Errorf("CosineSim(%v, %v) = %v, want 0", c.a, c.b, got)
+		}
+	}
+	if got := CosineSim([]float32{3, 4}, []float32{6, 8}); math.Abs(float64(got)-1) > 1e-6 {
+		t.Errorf("CosineSim of parallel vectors = %v, want 1", got)
 	}
 }

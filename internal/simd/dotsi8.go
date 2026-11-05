@@ -2,7 +2,7 @@ package simd
 
 // DotsI8 sets out[r] to the integer dot product of q and row r of block
 // (len(q) wide), exactly: the int8 centroid scan's kernel. Products and
-// sums fit int32 up to 133,000 dimensions.
+// sums fit int32 below 131,072 dimensions.
 func DotsI8(q, block []int8, out []int32) {
 	dims := len(q)
 	if dims == 0 || len(out) == 0 || len(block) != dims*len(out) || !hasAVX2 {

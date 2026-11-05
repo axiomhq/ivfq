@@ -19,6 +19,7 @@ func DecodeI8(dst []float32, b []byte) {
 	i := 0
 	if hasAVX2 && len(dst) >= 8 {
 		i = len(dst) &^ 7
+		_ = b[len(dst)-1]
 		decodeI8AVX2(&dst[0], &b[0], i)
 	}
 	for ; i < len(dst); i++ {

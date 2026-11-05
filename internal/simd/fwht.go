@@ -12,9 +12,13 @@ const FillBlock = 16
 // is one multiply per element.
 
 // FWHT transforms x in place by the unnormalised Walsh-Hadamard matrix; len(x)
-// must be a power of two. Dividing by sqrt(len(x)) makes it orthogonal.
+// must be a power of two, or FWHT panics. Dividing by sqrt(len(x)) makes it
+// orthogonal.
 func FWHT(x []float32) {
 	n := len(x)
+	if n&(n-1) != 0 {
+		panic("simd: FWHT length is not a power of two")
+	}
 	if n >= 8 && hasAVX2FMA {
 		fwht8(&x[0], n)
 		if n > 8 {
@@ -26,10 +30,14 @@ func FWHT(x []float32) {
 }
 
 // FWHTRows is FWHT across n rows of FillBlock values: x[j*FillBlock+r] is
-// element j of row r, and each row is transformed independently.
+// element j of row r, and each row is transformed independently. n must be
+// a power of two.
 func FWHTRows(x []float32, n int) {
 	if len(x) != n*FillBlock {
 		panic("simd: FWHTRows block of the wrong size")
+	}
+	if n&(n-1) != 0 {
+		panic("simd: FWHTRows row length is not a power of two")
 	}
 	if n > 1 && hasAVX2FMA {
 		fwhtStages(&x[0], n*FillBlock, FillBlock)
@@ -70,7 +78,8 @@ func Scale(dst, src, coef []float32) {
 }
 
 // PermScaleRows is PermScale over rows of FillBlock values:
-// row i of dst is coef[i] times row perm[i] of src.
+// row i of dst is coef[i] times row perm[i] of src. perm must index rows of
+// src; the vector kernel does not check it.
 func PermScaleRows(dst, src []float32, perm []int32, coef []float32) {
 	n := len(perm)
 	_, _, _ = dst[n*FillBlock-1], src[n*FillBlock-1], coef[n-1]
