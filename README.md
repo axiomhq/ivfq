@@ -81,7 +81,7 @@ per-cluster counts and radii. No rule ever touches every row.
 
 `bench` reads the Big ANN corpora and scores recall. Stdlib only.
 
-1. Read a corpus: `b, err := bench.OpenBin(path)`, then `b.Next(n)` in batches for `.u8bin`/`.fbin`.
+1. Read a corpus: `b, err := bench.OpenBin(path)`, `defer b.Close()`, then `b.Next(n)` in batches for `.u8bin`/`.i8bin`/`.fbin`. A sample cut from a corpus keeps the corpus header; read the rows you need, since reading past its end reports a truncation.
 2. Read the ground truth: `bench.ReadGroundTruth(path)` for `.ibin`.
 3. Score: `bench.RecallAtK(got, truth, 10)`.
 4. CPU time: `bench.CPUSeconds()` before and after a run.

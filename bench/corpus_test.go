@@ -15,6 +15,10 @@ func TestRecallAtK(t *testing.T) {
 	if r := RecallAtK(got, truth, 4); r != (3.0/4+1.0/4)/2 {
 		t.Fatalf("recall@4 = %v", r)
 	}
+	// A repeated id is one neighbour found, not k of them.
+	if r := RecallAtK([][]int32{{1, 1, 1}}, truth, 3); r != 1.0/3 {
+		t.Fatalf("duplicate ids: recall@3 = %v, want 1/3", r)
+	}
 	if r := RecallAtK(nil, truth, 10); r != 0 {
 		t.Fatalf("no queries: %v", r)
 	}

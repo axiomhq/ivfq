@@ -1,9 +1,10 @@
 package bench
 
-// RecallAtK is recall@k averaged over queries: for query i, the number of
-// got[i][:k] ids found in truth[i][:k], over k. got[i] and truth[i] belong
-// to the same query; truth has at least len(got) entries. A query that
-// returned fewer than k ids, or a truth row shorter than k, scores below 1.
+// RecallAtK is recall@k averaged over queries: for query i, the number
+// of distinct got[i][:k] ids found in truth[i][:k], over k. got[i] and
+// truth[i] belong to the same query; truth has at least len(got) entries.
+// A query that returned fewer than k ids, or a truth row shorter than k,
+// scores below 1.
 func RecallAtK(got, truth [][]int32, k int) float64 {
 	if len(got) == 0 || k <= 0 {
 		return 0
@@ -19,6 +20,7 @@ func RecallAtK(got, truth [][]int32, k int) float64 {
 		for _, id := range ids[:min(k, len(ids))] {
 			if want[id] {
 				inter++
+				delete(want, id)
 			}
 		}
 		hits += float64(inter) / float64(k)

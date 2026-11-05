@@ -5,7 +5,7 @@ code they correspond to. A separate module, so weaviate's dependencies stay out
 of ivfq's `go.mod`.
 
 ```sh
-git clone --depth 1 https://github.com/weaviate/weaviate ../../../weaviate   # next to this repo
+git clone --depth 1 https://github.com/weaviate/weaviate ../weaviate   # next to this repo
 cd bench/vsweaviate
 go test -run 'TestKernelsAgree'                  # kernel pairs compute the same value
 go test -run 'TestEstimatorQuality|TestSplitQuality' -v    # recall / WCSS tables
