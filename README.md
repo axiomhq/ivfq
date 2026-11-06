@@ -11,9 +11,9 @@ clusters, the codes and the scan.
 
 | package | what it holds |
 | --- | --- |
-| `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid `Tree`, the centroid codec, and the distance vocabulary (`Metric`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
+| `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid trees (`FloatTree`; `Tree[B]` over `Dense[T]` blocks), the centroid codec, and the distance vocabulary (`Metric`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
 | `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids; `Config.FitBalanced` for splits |
-| `rabitq` | 1-bit RaBitQ codes, one bit per dimension plus two float32 per row: `Quantize`, `Quantizer`, `Scorer`, `Rotation` |
+| `rabitq` | 1-bit RaBitQ codes, one bit per dimension plus two float32 per row: `Quantize`, `Quantizer`, `Scorer`, `Rotation`, and `Block` for `ivfq.Tree` |
 | `rank` | top-k selection and reciprocal rank fusion |
 | `codec` | f16 and int8 row storage |
 | `vector` | `Slice`: flat float32, f16, int8 or uint8 rows, read as `[][]float32` |
@@ -38,6 +38,24 @@ centroids, then k fine ones under them, and each row searches only its
 16 nearest coarse centroids' fine ones: about 17·√k distances per row,
 not k. To route rows later, `s := tree.NewSearcher()` then
 `s.Assign(row, beam)`, one `Searcher` per goroutine.
+
+`Build` returns a `FloatTree`: exact float32 centroids, `Leaf`, `Upsert`
+and a wire format. For a smaller immutable router, `BuildTree` builds the
+same hierarchy and stores every node's rows in a block you choose:
+
+```go
+small, err := ivfq.BuildTree(ctx, centroids, 32, ivfq.NewDense[int8])
+bits, err := ivfq.BuildTree(ctx, centroids, 32, func(rows [][]float32) (rabitq.Block, error) {
+	return rabitq.NewBlock(rows, rot)
+})
+probe := bits.Nearest(query, beam, ivfq.DefaultNprobe(k))
+```
+
+`Dense[float32]` routes exactly as `FloatTree`; `float16`, `int8` and
+`uint8` blocks round (integer blocks on one affine scale per block), and
+`rabitq.Block` ranks by 1-bit estimates, so it misses some exact
+neighbours and a dropped branch cannot be reranked back. A `Tree` keeps no
+float32 copy of the centroids: keep your own if you need them.
 
 ## Query
 

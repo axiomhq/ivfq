@@ -25,7 +25,7 @@ type nodeI8 struct {
 // dropped by Clone and by any change to the tree (Upsert, Truncate), after which
 // EvaluationsBeamI8Work reads the float32 leaves until QuantizeI8 runs again.
 // It writes t, so call it before t is shared.
-func (t *Tree) QuantizeI8() {
+func (t *FloatTree) QuantizeI8() {
 	for i := range t.nodes {
 		n := &t.nodes[i]
 		if len(n.children) > 0 || len(n.leaves) == 0 || len(n.block) != len(n.leaves)*t.dims {
@@ -61,7 +61,7 @@ func (t *Tree) QuantizeI8() {
 }
 
 // dropI8 forgets every holder's int8 copy: the tree changed under it.
-func (t *Tree) dropI8() {
+func (t *FloatTree) dropI8() {
 	for i := range t.nodes {
 		t.nodes[i].i8 = nil
 	}
@@ -111,7 +111,7 @@ type TreeWork struct {
 // bound is within the probe-th float32 distance so far. TreeWork counts
 // both kinds of distance. A tree without its int8 copies (not quantized,
 // or changed since) is searched by EvaluationsBeam.
-func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWork) {
+func (t FloatTree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWork) {
 	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
 		return nil, TreeWork{}
 	}
@@ -132,7 +132,7 @@ func (t Tree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, TreeWo
 
 // holdersQuantized reports whether every holder in holders has its int8
 // copy.
-func (t Tree) holdersQuantized(holders []int) bool {
+func (t FloatTree) holdersQuantized(holders []int) bool {
 	for _, id := range holders {
 		if t.nodes[id].i8 == nil {
 			return false
@@ -146,7 +146,7 @@ func (t Tree) holdersQuantized(holders []int) bool {
 // nearest, nearest first, exactly as a float32 ranking of the same leaves
 // orders them. Every holder in w.holders must be quantized. The result is
 // w.out8, nil when no leaf was scanned.
-func (t Tree) rankHoldersI8(w *treeWorkspace, q []float32, count int, keep []bool) ([]rankedNode, TreeWork) {
+func (t FloatTree) rankHoldersI8(w *treeWorkspace, q []float32, count int, keep []bool) ([]rankedNode, TreeWork) {
 	var work TreeWork
 	qq := Dot(q, q)
 	if cap(w.q8) < t.dims {
@@ -238,7 +238,7 @@ func allKept(leaves []int, keep []bool) bool {
 
 // beamHolders is nearestInto's beam over the internal nodes: w.holders is
 // the leaf holders it reaches, and it returns the distances computed.
-func (t Tree) beamHolders(w *treeWorkspace, q []float32, qq float32, beam int) int {
+func (t FloatTree) beamHolders(w *treeWorkspace, q []float32, qq float32, beam int) int {
 	w.active = append(w.active[:0], t.root)
 	w.holders = w.holders[:0]
 	evals := 0

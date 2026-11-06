@@ -10,7 +10,7 @@ import (
 
 // filteredExact is the oracle: the probe nearest eligible leaves by the
 // float32 distance the tree computes, ties by id.
-func filteredExact(t Tree, q []float32, eligible []int, probe int) []int {
+func filteredExact(t FloatTree, q []float32, eligible []int, probe int) []int {
 	qq := Dot(q, q)
 	seen := map[int]bool{}
 	var c []rankedNode

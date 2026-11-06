@@ -112,7 +112,7 @@ func TestTreeSearcherMatchesNearest(t *testing.T) {
 	}
 }
 
-func mustBytes(t Tree) []byte {
+func mustBytes(t FloatTree) []byte {
 	b, e := t.MarshalBinary()
 	if e != nil {
 		panic(e)
@@ -120,7 +120,7 @@ func mustBytes(t Tree) []byte {
 	return b
 }
 
-func mustBuild(v [][]float32, fanout int) Tree {
+func mustBuild(v [][]float32, fanout int) FloatTree {
 	t, err := Build(context.Background(), v, fanout)
 	if err != nil {
 		panic(err)
@@ -131,7 +131,7 @@ func mustBuild(v [][]float32, fanout int) Tree {
 // nearestIntoReference is the original append-then-select beam search.
 // Keep it independent of nearestInto so changes to the hot path have an
 // exact traversal and evaluation-count oracle.
-func (t Tree) nearestIntoReference(w *treeWorkspace, q []float32, beam, count int) ([]rankedNode, int) {
+func (t FloatTree) nearestIntoReference(w *treeWorkspace, q []float32, beam, count int) ([]rankedNode, int) {
 	if t.root < 0 || beam <= 0 || count <= 0 || len(q) != t.dims {
 		return nil, 0
 	}
@@ -248,7 +248,7 @@ func TestTreeIdenticalCentroids(t *testing.T) {
 // the built tree's.
 func TestTreeTwoStage(t *testing.T) {
 	v := treeData(3000, 32)
-	for _, tree := range []Tree{mustBuild(v, 16), mustRoundTrip(t, v, 16)} {
+	for _, tree := range []FloatTree{mustBuild(v, 16), mustRoundTrip(t, v, 16)} {
 		fan := len(tree.nodes[tree.root].children)
 		s := tree.NewSearcher()
 		for i := 0; i < 200; i++ {
@@ -280,7 +280,7 @@ func TestTreeTwoStage(t *testing.T) {
 	}
 }
 
-func mustRoundTrip(t *testing.T, v [][]float32, fanout int) Tree {
+func mustRoundTrip(t *testing.T, v [][]float32, fanout int) FloatTree {
 	t.Helper()
 	tree, err := UnmarshalTree(mustBytes(mustBuild(v, fanout)))
 	if err != nil {
@@ -292,7 +292,7 @@ func mustRoundTrip(t *testing.T, v [][]float32, fanout int) Tree {
 // twoBucketSize counts the leaves under the two root children whose
 // centroids are nearest q — the subtrees a top-2 stage two opens. Ties
 // break by child order, as selectNearest ranks them.
-func twoBucketSize(t *testing.T, tree *Tree, q []float32) int {
+func twoBucketSize(t *testing.T, tree *FloatTree, q []float32) int {
 	t.Helper()
 	root := &tree.nodes[tree.root]
 	type rank struct {
@@ -380,7 +380,7 @@ func TestUnmarshalTreeRejectsCorrupt(t *testing.T) {
 // yet nearest descends its children and never ranks its leaves: a hidden
 // part of the search space, so it is corrupt rather than merely odd.
 func TestUnmarshalTreeRejectsMixedNode(t *testing.T) {
-	mixed := Tree{dims: 2, fanout: 2, root: 0, height: 2, leaves: [][]float32{{0, 0}, {1, 1}}, nodes: []treeNode{
+	mixed := FloatTree{dims: 2, fanout: 2, root: 0, height: 2, leaves: [][]float32{{0, 0}, {1, 1}}, nodes: []treeNode{
 		{centroid: []float32{0.5, 0.5}, children: []int{1}, leaves: []int{0}},
 		{centroid: []float32{1, 1}, leaves: []int{1}},
 	}}
@@ -403,7 +403,7 @@ func TestBuildCancelled(t *testing.T) {
 		t.Fatalf("Build on cancelled ctx: err = %v", err)
 	}
 	tree, err := Build(cancelled, [][]float32{{1}}, 2)
-	if err != context.Canceled || !reflect.DeepEqual(tree, Tree{}) {
+	if err != context.Canceled || !reflect.DeepEqual(tree, FloatTree{}) {
 		t.Fatalf("leaf Build on cancelled ctx = (%+v, %v)", tree, err)
 	}
 }
@@ -621,21 +621,21 @@ func TestTreeUpsertReplaceAndAppend(t *testing.T) {
 func TestTreeUpsertCloneIsolation(t *testing.T) {
 	v := treeData(2000, 16)
 	queries := treeRand(50, 16, 17)
-	search := func(t Tree) [][]int {
+	search := func(t FloatTree) [][]int {
 		out := make([][]int, len(queries))
 		for i, q := range queries {
 			out[i] = t.Nearest(q, 8)
 		}
 		return out
 	}
-	leaves := func(t Tree) [][]float32 {
+	leaves := func(t FloatTree) [][]float32 {
 		out := make([][]float32, len(t.leaves))
 		for i, x := range t.leaves {
 			out[i] = append([]float32(nil), x...)
 		}
 		return out
 	}
-	upserts := func(tr *Tree) {
+	upserts := func(tr *FloatTree) {
 		q := append([]float32(nil), tr.leaves[7]...)
 		q[0] += 3
 		if err := tr.Upsert(7, q); err != nil {
@@ -701,7 +701,7 @@ func TestTreeUpsertErrors(t *testing.T) {
 	if after, _ := tree.MarshalBinary(); !bytes.Equal(before, after) {
 		t.Fatal("a rejected upsert changed the tree")
 	}
-	var empty Tree
+	var empty FloatTree
 	if err := empty.Upsert(0, []float32{float32(math.NaN()), 1}); err == nil || empty.Dims() != 0 {
 		t.Fatalf("an empty tree took a rejected vector: err %v, dims %d", err, empty.Dims())
 	}
@@ -752,7 +752,7 @@ func TestTreeUpsertEmptyTree(t *testing.T) {
 	}
 
 	// The zero value and a zero-dimensional tree search and round-trip.
-	var none Tree
+	var none FloatTree
 	if got := none.Nearest(nil, 4); len(got) != 0 {
 		t.Fatalf("zero-value tree found %v", got)
 	}
@@ -764,7 +764,7 @@ func TestTreeUpsertEmptyTree(t *testing.T) {
 		t.Fatalf("zero-dimensional tree found %v", got)
 	}
 
-	var zero Tree
+	var zero FloatTree
 	if err := zero.Upsert(0, v); err != nil {
 		t.Fatal(err)
 	}
@@ -898,7 +898,7 @@ func TestEvaluationsBeamI8IsEvaluationsBeam(t *testing.T) {
 		tree.QuantizeI8()
 		qs := append(treeData(60, dims), v[7], make([]float32, dims))
 		var exact, scanned int
-		check := func(name string, tr Tree) {
+		check := func(name string, tr FloatTree) {
 			for qi, q := range qs {
 				for _, c := range [][2]int{{16, 96}, {4, 50}, {200, 400}, {16, 1}, {16, 5000}} {
 					want, all := tr.EvaluationsBeam(q, c[0], c[1])

@@ -1,6 +1,6 @@
 // Package ivfq is the clustering half of an IVF index in the FAISS sense
 // ("IVF + quantizer"): the sizing rule that keeps clusters at about
-// HoodTarget vectors, the centroid Tree a query probes, the split and merge
+// HoodTarget vectors, the centroid trees a query probes, the split and merge
 // rules that hold cluster sizes between rebuilds, the Policy that names the
 // next cluster to split, and a binary codec for centroid sets and their
 // deltas. It also holds the distance vocabulary every subpackage shares:

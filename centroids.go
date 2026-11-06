@@ -193,7 +193,7 @@ func CentroidDelta(prev, next [][]float32, limit int) ([]CentroidUpsert, bool) {
 // ApplyCentroidDeltas upserts deltas, oldest first, into t in place. An
 // error leaves t with the entries before it applied, so apply to a Clone
 // when t must survive a bad delta.
-func (t *Tree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
+func (t *FloatTree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
 	for _, d := range deltas {
 		for _, e := range d {
 			var err error
@@ -218,7 +218,7 @@ func (t *Tree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
 // its length first (Truncate). At most limit slots are upserted (callers
 // pass max(2, t.Leaves()/16), the CentroidDelta bound); past it ok is
 // false and the caller builds.
-func (t *Tree) UpsertAll(centroids [][]float32, limit int) (*Tree, bool) {
+func (t *FloatTree) UpsertAll(centroids [][]float32, limit int) (*FloatTree, bool) {
 	leaves := t.Leaves()
 	if len(centroids) == 0 {
 		return nil, false

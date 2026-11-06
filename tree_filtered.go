@@ -31,7 +31,7 @@ import (
 // lists, integer work and no distance. Ids outside [0, Leaves()) and
 // leaves no holder owns (Upsert/Truncate can leave some) are never
 // returned; duplicates count once.
-func (t Tree) FilteredNearest(q []float32, eligible []int, beam, probe int) ([]int, TreeWork) {
+func (t FloatTree) FilteredNearest(q []float32, eligible []int, beam, probe int) ([]int, TreeWork) {
 	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims || len(eligible) == 0 {
 		return nil, TreeWork{}
 	}
@@ -85,7 +85,7 @@ var filterWorkspaces = sync.Pool{New: func() any { return new(filterWorkspace) }
 // parents (Build appends a node before its children, UnmarshalTree rejects
 // any other order, and Upsert adds no nodes to a non-empty tree), so one
 // pass from the last node up has every child's count before its parent's.
-func (w *filterWorkspace) mask(t Tree, eligible []int) int {
+func (w *filterWorkspace) mask(t FloatTree, eligible []int) int {
 	if cap(w.keep) < len(t.leaves) {
 		w.keep = make([]bool, len(t.leaves))
 	}
@@ -120,7 +120,7 @@ func (w *filterWorkspace) mask(t Tree, eligible []int) int {
 // the eligible holders it reaches, and it returns the float32 distances it
 // computed. A level keeps its nearest beam nodes, then more, nearest first,
 // until the holders reached and the nodes kept hold want eligible leaves.
-func (t Tree) filteredHolders(w *filterWorkspace, q []float32, beam, want int) int {
+func (t FloatTree) filteredHolders(w *filterWorkspace, q []float32, beam, want int) int {
 	tw := &w.treeWorkspace
 	tw.active = append(tw.active[:0], t.root)
 	tw.holders = tw.holders[:0]
@@ -179,7 +179,7 @@ func (t Tree) filteredHolders(w *filterWorkspace, q []float32, beam, want int) i
 
 // rankHoldersF32 ranks the eligible leaves of w.holders in float32: the
 // count nearest, nearest first, ties by id.
-func (t Tree) rankHoldersF32(w *filterWorkspace, q []float32, count int) ([]rankedNode, TreeWork) {
+func (t FloatTree) rankHoldersF32(w *filterWorkspace, q []float32, count int) ([]rankedNode, TreeWork) {
 	var work TreeWork
 	tw := &w.treeWorkspace
 	qq := Dot(q, q)
