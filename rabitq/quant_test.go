@@ -254,24 +254,21 @@ func ExampleScorer_RefineBounds() {
 	hint := s.ScoreAllLazy(scores)
 	shortlist := rank.NewTopK(2)
 	for row, score := range scores {
-		shortlist.Push(fmt.Sprint(row), score)
+		shortlist.Push(row, score)
 	}
 	top := rank.NewTopK(1)
-	seen := make(map[string]bool)
+	seen := make(map[int]bool)
 	for _, hit := range shortlist.Hits() {
-		var row int
-		fmt.Sscan(hit.ID, &row)
-		top.Push(hit.ID, ivfq.Score(ivfq.L2, query, rows[row]))
+		top.Push(hit.ID, ivfq.Score(ivfq.L2, query, rows[hit.ID]))
 		seen[hit.ID] = true
 	}
 	cutoff, _ := top.Cutoff() // the exact top-k is full before pruning
 	s.RefineBounds(scores, bounds, cutoff.Score, hint)
 	for row, bound := range bounds {
-		id := fmt.Sprint(row)
-		if bound < cutoff.Score || seen[id] {
+		if bound < cutoff.Score || seen[row] {
 			continue
 		}
-		top.Push(id, ivfq.Score(ivfq.L2, query, rows[row]))
+		top.Push(row, ivfq.Score(ivfq.L2, query, rows[row]))
 		cutoff, _ = top.Cutoff() // only rises; retain original row order
 	}
 	fmt.Println(top.Hits()[0].ID)

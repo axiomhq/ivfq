@@ -6,13 +6,12 @@ import (
 	"math/rand"
 	"slices"
 	"sort"
-	"strconv"
 	"testing"
 )
 
 func TestTopKTieBreak(t *testing.T) {
-	hits := Select([]Hit{{"b", 1}, {"a", 1}, {"c", 2}}, 2)
-	if hits[0].ID != "c" || hits[1].ID != "a" {
+	hits := Select([]Hit{{2, 1}, {1, 1}, {3, 2}}, 2)
+	if hits[0].ID != 3 || hits[1].ID != 1 {
 		t.Fatalf("tie-break not deterministic: %+v", hits)
 	}
 }
@@ -48,7 +47,7 @@ func TestTopKMatchesSortedReference(t *testing.T) {
 			// score (broken by id ascending) and outright duplicates are what
 			// a bounded heap gets wrong, and at these widths they are certain.
 			// NaN must not tie with every score.
-			hits[i] = Hit{ID: string(rune('a' + rng.Intn(12))), Score: float32(rng.Intn(8))}
+			hits[i] = Hit{ID: rng.Intn(12), Score: float32(rng.Intn(8))}
 			if rng.Intn(6) == 0 {
 				hits[i].Score = float32(math.NaN())
 			}
@@ -73,7 +72,7 @@ func BenchmarkTopK(b *testing.B) {
 	rng := rand.New(rand.NewSource(11))
 	hits := make([]Hit, 1_000_000)
 	for i := range hits {
-		hits[i] = Hit{ID: strconv.Itoa(i), Score: rng.Float32()}
+		hits[i] = Hit{ID: i, Score: rng.Float32()}
 	}
 	b.ReportAllocs()
 	for b.Loop() {
@@ -86,29 +85,29 @@ func TestTopKCutoff(t *testing.T) {
 	if _, ok := top.Cutoff(); ok {
 		t.Fatal("partial selector has cutoff")
 	}
-	top.Push("b", 1)
-	top.Push("a", 1)
-	if got, ok := top.Cutoff(); !ok || got.ID != "b" || got.Score != 1 {
+	top.Push(2, 1)
+	top.Push(1, 1)
+	if got, ok := top.Cutoff(); !ok || got.ID != 2 || got.Score != 1 {
 		t.Fatalf("cutoff = %+v, %v", got, ok)
 	}
 }
 
 func TestTopKPushAfterHits(t *testing.T) {
 	top := NewTopK(2)
-	top.Push("a", 1)
-	top.Push("b", 2)
+	top.Push(1, 1)
+	top.Push(2, 2)
 	hits := top.Hits()
-	if want := []Hit{{"b", 2}, {"a", 1}}; !slices.Equal(hits, want) {
+	if want := []Hit{{2, 2}, {1, 1}}; !slices.Equal(hits, want) {
 		t.Fatalf("hits = %v, want %v", hits, want)
 	}
-	if got, ok := top.Cutoff(); !ok || got != (Hit{"a", 1}) {
+	if got, ok := top.Cutoff(); !ok || got != (Hit{1, 1}) {
 		t.Errorf("cutoff after Hits = %+v, %v", got, ok)
 	}
-	top.Push("c", 1.5)
-	if got, want := top.Hits(), []Hit{{"b", 2}, {"c", 1.5}}; !slices.Equal(got, want) {
+	top.Push(3, 1.5)
+	if got, want := top.Hits(), []Hit{{2, 2}, {3, 1.5}}; !slices.Equal(got, want) {
 		t.Fatalf("hits after Push = %v, want %v", got, want)
 	}
-	if !slices.Equal(hits, []Hit{{"b", 2}, {"a", 1}}) {
+	if !slices.Equal(hits, []Hit{{2, 2}, {1, 1}}) {
 		t.Fatalf("Push mutated earlier hits: %v", hits)
 	}
 }

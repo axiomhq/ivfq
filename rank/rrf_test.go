@@ -13,8 +13,8 @@ func TestRRF(t *testing.T) {
 		}
 		return float32(s)
 	}
-	vec := []Hit{{ID: "a", Score: 0.9}, {ID: "b", Score: 0.8}, {ID: "c", Score: 0.7}}
-	txt := []Hit{{ID: "b", Score: 5.0}, {ID: "d", Score: 4.0}}
+	vec := []Hit{{ID: 1, Score: 0.9}, {ID: 2, Score: 0.8}, {ID: 3, Score: 0.7}}
+	txt := []Hit{{ID: 2, Score: 5.0}, {ID: 4, Score: 4.0}}
 	cases := []struct {
 		name string
 		legs [][]Hit
@@ -22,36 +22,36 @@ func TestRRF(t *testing.T) {
 		want []Hit
 	}{
 		{
-			// b: rank 2 + rank 1 beats a: rank 1 alone.
+			// 2: rank 2 + rank 1 beats 1: rank 1 alone.
 			name: "two legs fuse",
 			legs: [][]Hit{vec, txt},
 			k:    10,
 			want: []Hit{
-				{ID: "b", Score: rr(2, 1)},
-				{ID: "a", Score: rr(1)},
-				{ID: "d", Score: rr(2)},
-				{ID: "c", Score: rr(3)},
+				{ID: 2, Score: rr(2, 1)},
+				{ID: 1, Score: rr(1)},
+				{ID: 4, Score: rr(2)},
+				{ID: 3, Score: rr(3)},
 			},
 		},
 		{
 			// Equal fused scores break ties by id ascending: both singleton
 			// legs give their doc rank 1.
 			name: "tie broken by id",
-			legs: [][]Hit{{{ID: "z", Score: 1}}, {{ID: "m", Score: 1}}},
+			legs: [][]Hit{{{ID: 26, Score: 1}}, {{ID: 13, Score: 1}}},
 			k:    10,
-			want: []Hit{{ID: "m", Score: rr(1)}, {ID: "z", Score: rr(1)}},
+			want: []Hit{{ID: 13, Score: rr(1)}, {ID: 26, Score: rr(1)}},
 		},
 		{
 			name: "k truncates",
 			legs: [][]Hit{vec, txt},
 			k:    2,
-			want: []Hit{{ID: "b", Score: rr(2, 1)}, {ID: "a", Score: rr(1)}},
+			want: []Hit{{ID: 2, Score: rr(2, 1)}, {ID: 1, Score: rr(1)}},
 		},
 		{
 			name: "empty leg is a no-op",
 			legs: [][]Hit{vec, nil},
 			k:    10,
-			want: []Hit{{ID: "a", Score: rr(1)}, {ID: "b", Score: rr(2)}, {ID: "c", Score: rr(3)}},
+			want: []Hit{{ID: 1, Score: rr(1)}, {ID: 2, Score: rr(2)}, {ID: 3, Score: rr(3)}},
 		},
 		{
 			name: "no legs",
@@ -61,14 +61,14 @@ func TestRRF(t *testing.T) {
 		},
 		{
 			// A doc repeated within one leg counts its best rank once:
-			// b's ranks are 1 (not 1+3) and 2 → same fusion as one clean copy.
+			// 2's ranks are 1 (not 1+3) and 2 → same fusion as one clean copy.
 			name: "duplicate id within a leg keeps best rank",
-			legs: [][]Hit{{{ID: "b", Score: 3}, {ID: "a", Score: 2}, {ID: "b", Score: 1}}, txt},
+			legs: [][]Hit{{{ID: 2, Score: 3}, {ID: 1, Score: 2}, {ID: 2, Score: 1}}, txt},
 			k:    10,
 			want: []Hit{
-				{ID: "b", Score: rr(1, 1)},
-				{ID: "a", Score: rr(2)},
-				{ID: "d", Score: rr(2)},
+				{ID: 2, Score: rr(1, 1)},
+				{ID: 1, Score: rr(2)},
+				{ID: 4, Score: rr(2)},
 			},
 		},
 		{
@@ -90,14 +90,14 @@ func TestRRF(t *testing.T) {
 }
 
 func TestFusionRRF(t *testing.T) {
-	vec := []Hit{{ID: "a", Score: 0.9}, {ID: "b", Score: 0.8}}
-	txt := []Hit{{ID: "b", Score: 5.0}, {ID: "c", Score: 4.0}}
-	// weights 3 and 1, constant 10: a = 3/11, b = 3/12 + 1/11, c = 1/12.
+	vec := []Hit{{ID: 1, Score: 0.9}, {ID: 2, Score: 0.8}}
+	txt := []Hit{{ID: 2, Score: 5.0}, {ID: 3, Score: 4.0}}
+	// weights 3 and 1, constant 10: 1 = 3/11, 2 = 3/12 + 1/11, 3 = 1/12.
 	got := Fusion{RankConstant: 10, Weights: []float64{3, 1}}.RRF(10, vec, txt)
 	want := []Hit{
-		{ID: "b", Score: float32(3.0/12 + 1.0/11)},
-		{ID: "a", Score: float32(3.0 / 11)},
-		{ID: "c", Score: float32(1.0 / 12)},
+		{ID: 2, Score: float32(3.0/12 + 1.0/11)},
+		{ID: 1, Score: float32(3.0 / 11)},
+		{ID: 3, Score: float32(1.0 / 12)},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v want %+v", got, want)

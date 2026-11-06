@@ -15,8 +15,6 @@ clusters, the codes and the scan.
 | `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids; `Config.FitBalanced` for splits |
 | `rabitq` | 1-bit RaBitQ codes, one bit per dimension plus two float32 per row: `Quantize`, `Quantizer`, `Scorer`, `Rotation` |
 | `rank` | top-k selection and reciprocal rank fusion |
-| `late` | late-interaction scoring of multi-vector documents |
-| `sparse` | the string-keyed sparse vector |
 | `codec` | f16 and int8 row storage |
 | `vector` | `Slice`: flat float32, f16, int8 or uint8 rows, read as `[][]float32` |
 | `bench` | Big ANN corpus readers and recall@k |
@@ -72,10 +70,10 @@ per-cluster counts, radii and centroids. No rule ever touches every row.
 ## Rank
 
 `rank` orders hits by score descending, NaN last, ties by id ascending.
+Ids are ints: row or leaf numbers, as the rest of ivfq returns them.
 
 1. Select the top k as you score: `sel := rank.NewTopK(k)`, `sel.Push(id, score)` per candidate, then `sel.Hits()`. `rank.Select(hits, k)` does the same for a slice.
 2. Fuse ranked legs: `rank.RRF(k, legs...)`, or `rank.Fusion{RankConstant: c, Weights: w}.RRF(k, legs...)` after `Validate(len(legs))`.
-3. Late interaction: `late.Score(metric, queryTokens, docTokens)` sums, over query tokens, the best document-token score. Check inputs with `late.Validate` first.
 
 ## Benchmark data
 

@@ -45,13 +45,13 @@ func (f Fusion) RRF(k int, legs ...[]Hit) []Hit {
 	if c <= 0 {
 		c = rrfK
 	}
-	fused := map[string]float64{}
+	fused := map[int]float64{}
 	for i, leg := range legs {
 		w := 1.0
 		if i < len(f.Weights) {
 			w = f.Weights[i]
 		}
-		seen := map[string]bool{}
+		seen := map[int]bool{}
 		for rank, h := range leg {
 			if seen[h.ID] {
 				continue

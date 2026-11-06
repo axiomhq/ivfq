@@ -6,9 +6,10 @@ import (
 	"sort"
 )
 
-// Hit is one scored result.
+// Hit is one scored result. ID is a row or leaf number, or a caller's own
+// handle converted to int.
 type Hit struct {
-	ID    string  `json:"id"`
+	ID    int     `json:"id"`
 	Score float32 `json:"score"`
 }
 
@@ -28,9 +29,7 @@ func Select(hits []Hit, k int) []Hit {
 }
 
 // TopK is Select as an accumulator: push candidates as they are scored and the
-// slice holding all of them never has to exist. A query path scoring ~1M
-// candidates would otherwise allocate ~24 MB of []Hit garbage per query on
-// top of the sort.
+// slice holding all of them never has to exist.
 //
 // It keeps a k-sized min-heap under the INVERSE of the result order, so the
 // root is the weakest hit kept and a candidate that cannot make the cut costs
@@ -46,7 +45,7 @@ func NewTopK(k int) *TopK { return &TopK{k: k} }
 
 // Push offers one scored candidate. Order of pushes does not affect the
 // result: worse fully determines the ranking of any two distinct hits.
-func (t *TopK) Push(id string, score float32) {
+func (t *TopK) Push(id int, score float32) {
 	if t.k <= 0 {
 		return
 	}
