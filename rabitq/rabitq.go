@@ -313,10 +313,17 @@ func (b *Code) fillRows(n int, work func(i int) []float32, rot *Rotation) {
 			m++
 		}
 		var norms, absSums [simd.FillBlock]float64
+		var exps [simd.FillBlock]int
 		simd.BlockSumSq(block, dims, &norms)
 		for r, i := range rows[:m] {
 			norms[r] = math.Sqrt(norms[r])
 			b.Norms[i] = float32(norms[r]) // 0: the row IS the centroid, no bits, alignment 0
+			if exps[r] = residualExp(norms[r]); exps[r] != 0 {
+				for j := 0; j < dims; j++ {
+					x := &block[j*simd.FillBlock+r]
+					*x = float32(math.Ldexp(float64(*x), exps[r]))
+				}
+			}
 		}
 		rot.applyBlock(block) // rows past m are stale and ignored
 		// Sign bits and |x| sums in vector registers, one row per lane: a
@@ -336,10 +343,33 @@ func (b *Code) fillRows(n int, work func(i int) []float32, rot *Rotation) {
 				continue
 			}
 			// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = residual/norm.
-			align := absSums[r] / (norms[r] * scale)
+			align := absSums[r] / (math.Ldexp(norms[r], exps[r]) * scale)
 			b.Aligns[i] = float32(min(1, align))
 		}
 	}
+}
+
+// tinyResidual is the residual norm under which a residual is scaled by a
+// power of two before it is rotated. Below it the rotation's float32
+// products round into subnormals (a 2^-149 residual halves to 0 in one
+// round), so its signs and alignment would stop describing it, and a
+// stored nonzero norm would carry an alignment of 0, a frame the decoder
+// rightly rejects. Above it that rounding, under 2^-149 per value, adds up
+// to about D*2^-89 of the norm, negligible at any width. Scaling by a power of two is exact, so the bits and
+// alignment are the residual's own and the stored norm stays its true one;
+// residuals at or above it encode bit for bit as they always have. Scaling
+// is also bit-identical below it until the rotation meets subnormals, so
+// the threshold is where scaling starts to pay, not a format boundary.
+const tinyResidual = 0x1p-60
+
+// residualExp is the k for which 2^k scales a tiny residual of norm n into
+// [0.5, 1), and 0 for a zero or not tiny one.
+func residualExp(n float64) int {
+	if n == 0 || n >= tinyResidual {
+		return 0
+	}
+	_, e := math.Frexp(n)
+	return -e
 }
 
 // workRow keeps an L2 row and copies only when normalizing cosine. nil
@@ -545,6 +575,12 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	if b.Norms[i] == 0 {
 		return
 	}
+	k := residualExp(n)
+	if k != 0 {
+		for j, x := range scratch {
+			scratch[j] = float32(math.Ldexp(float64(x), k))
+		}
+	}
 	rot.Apply(scratch)
 	var absSum float64
 	for j, x := range scratch {
@@ -555,8 +591,8 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 			absSum -= float64(x)
 		}
 	}
-	// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = scratch/n.
-	align := absSum / (n * math.Sqrt(float64(dims)))
+	// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = scratch/(n*2^k).
+	align := absSum / (math.Ldexp(n, k) * math.Sqrt(float64(dims)))
 	b.Aligns[i] = float32(min(1, align))
 }
 
@@ -735,8 +771,10 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		resid = s.resid[:d]
 	}
 	var n float64
+	k := 0 // resid holds the rotated residual times 2^k (residualExp)
 	if rc != nil && q.rotated != nil {
-		// Rotated: R(q-c) = Rq - Rc, no rotation per column.
+		// Rotated: R(q-c) = Rq - Rc, no rotation per column. It subtracts
+		// after rotating, so it never rotates a tiny residual: k stays 0.
 		for j := range resid {
 			resid[j] = q.rotated[j] - rc[j]
 		}
@@ -753,6 +791,11 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 			resid[j] -= b.centroid(j)
 		}
 		n = simd.SumSq(resid)
+		if k = residualExp(math.Sqrt(n)); k != 0 {
+			for j, x := range resid {
+				resid[j] = float32(math.Ldexp(float64(x), k))
+			}
+		}
 		q.Rotation.Apply(resid)
 	}
 	s.qNorm = math.Sqrt(n)
@@ -766,7 +809,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	// rounding residual's norm rather than bounded worst-case (a worst-case
 	// query term is sqrt(D)*delta/2, three times the data term at 128 dims,
 	// and it would swamp a bound whose whole job is to prune).
-	inv := 1 / s.qNorm
+	inv := 1 / math.Ldexp(s.qNorm, k)
 	lo, hi := simd.MinMaxScaled(resid, inv)
 	delta := (hi - lo) / queryLevels
 	s.low, s.delta = lo, delta

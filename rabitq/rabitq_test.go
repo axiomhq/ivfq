@@ -728,3 +728,113 @@ func TestTruncRoundIsRound(t *testing.T) {
 		}
 	}
 }
+
+// Residuals too small to survive the float32 rotation (a 2^-149 residual
+// halves to 0 in one round) still encode as valid frames that round-trip,
+// keep their true norms, and agree between Quantize and AppendRows.
+// Scaling by 2^-64 is exact, so a tiny column must hold exactly the normal
+// column's bits and alignments, norms scaled by 2^-64, and score and bound
+// a scaled query exactly 2^-128 times the normal scores and bounds.
+func TestTinyResiduals(t *testing.T) {
+	s := float32(math.SmallestNonzeroFloat32)
+	rot4 := NewRotation(1, 4)
+	roundTrip := func(name string, q Quantizer, err error) Quantizer {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		data, err := q.MarshalBinary()
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		back, err := UnmarshalBinary(data)
+		if err != nil {
+			t.Fatalf("%s: unmarshal: %v", name, err)
+		}
+		return back
+	}
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		opts := Options{Metric: metric, Rotation: rot4}
+		seed, err := Quantize([][]float32{{1, 0, 0, 0}}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		app, err := AppendRows(seed, rot4, [][]float32{{1, s, 0, 0}})
+		app = roundTrip(metric.String()+" append", app, err)
+		pair, err := Quantize([][]float32{{1, s, 0, 0}, {1, -s, 0, 0}}, opts)
+		pair = roundTrip(metric.String()+" pair", pair, err)
+		if app.Code.Norms[1] != s || pair.Code.Norms[0] != s || pair.Code.Norms[1] != s {
+			t.Fatalf("%s: residual norms %v %v, want %v", metric, app.Code.Norms, pair.Code.Norms, s)
+		}
+		// Quantize (fillRows) and AppendRows (fillRow) encode alike.
+		empty, err := Empty(pair.Code.Centroid, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := AppendRows(empty, rot4, [][]float32{{1, s, 0, 0}, {1, -s, 0, 0}})
+		if err != nil || !slices.Equal(again.Code.Words, pair.Code.Words) || !bitsEqual(again.Code.Aligns, pair.Code.Aligns) || !bitsEqual(again.Code.Norms, pair.Code.Norms) {
+			t.Fatalf("%s: AppendRows %+v, Quantize %+v (%v)", metric, again.Code, pair.Code, err)
+		}
+	}
+
+	const dims, k = 16, -64
+	rng := rand.New(rand.NewSource(3))
+	rot := NewRotation(9, dims)
+	normal, tiny := make([][]float32, 40), make([][]float32, 40)
+	for i := range normal {
+		normal[i], tiny[i] = make([]float32, dims), make([]float32, dims)
+		for j := range normal[i] {
+			normal[i][j] = float32(rng.NormFloat64())
+			tiny[i][j] = float32(math.Ldexp(float64(normal[i][j]), k))
+		}
+	}
+	opts := Options{Metric: ivfq.L2, Rotation: rot}
+	n, err := Quantize(normal, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tq, err := Quantize(tiny, opts)
+	tq = roundTrip("scaled", tq, err)
+	for i := range normal {
+		if tq.Code.Norms[i] != float32(math.Ldexp(float64(n.Code.Norms[i]), k)) {
+			t.Fatalf("row %d: norm %v, want %v * 2^%d", i, tq.Code.Norms[i], n.Code.Norms[i], k)
+		}
+	}
+	if !slices.Equal(tq.Code.Words, n.Code.Words) || !bitsEqual(tq.Code.Aligns, n.Code.Aligns) {
+		t.Fatal("a scaled column's bits or alignments differ from the normal column's")
+	}
+	empty, err := Empty(tq.Code.Centroid, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := AppendRows(empty, rot, tiny)
+	if err != nil || !slices.Equal(app.Code.Words, tq.Code.Words) || !bitsEqual(app.Code.Aligns, tq.Code.Aligns) || !bitsEqual(app.Code.Norms, tq.Code.Norms) {
+		t.Fatalf("AppendRows of the tiny rows differs from Quantize's (%v)", err)
+	}
+	for _, qv := range blockCorpus(5, dims, 4) {
+		tqv := make([]float32, dims)
+		for j, x := range qv {
+			qv[j] = x / 3
+			tqv[j] = float32(math.Ldexp(float64(qv[j]), k))
+		}
+		ns, ts := n.Scorer(NewQuery(qv, ivfq.L2, rot)), tq.Scorer(NewQuery(tqv, ivfq.L2, rot))
+		for i := range normal {
+			s1, b1 := ns.ScoreAndBound(i)
+			s2, b2 := ts.ScoreAndBound(i)
+			if !scaledBy(s2, s1, 2*k) || !scaledBy(b2, b1, 2*k) {
+				t.Fatalf("row %d: tiny score %v bound %v, want %v and %v times 2^%d", i, s2, b2, s1, b1, 2*k)
+			}
+		}
+	}
+}
+
+// scaledBy reports whether got is want*2^k: exactly, or within two
+// subnormal steps (rounding, then a bound's nextUp) where want*2^k is
+// itself subnormal in float32.
+func scaledBy(got, want float32, k int) bool {
+	w := math.Ldexp(float64(want), k)
+	if math.Abs(w) >= 0x1p-126 {
+		return got == float32(w)
+	}
+	return math.Abs(float64(got)-w) <= 0x1p-148
+}
