@@ -138,3 +138,116 @@ func TestDenseConversions(t *testing.T) {
 		t.Fatal("65520 rounds past float16's range and was accepted")
 	}
 }
+
+var _ Encoder[int8, Dense[float16.Float16]] = DenseEncoder[int8, float16.Float16]{}
+
+// DenseEncoder reads every source scalar by value (float16 as a half, int8
+// signed, uint8 past 127), keeps nothing of its input, and encodes exactly
+// as NewDense over the source's Float32Rows does, for every output type.
+func TestDenseEncoder(t *testing.T) {
+	half := func(bits ...uint16) []float16.Float16 {
+		out := make([]float16.Float16, len(bits))
+		for i, b := range bits {
+			out[i] = float16.Frombits(b)
+		}
+		return out
+	}
+	checkDenseEncoder(t, vector.Slice[float32]{Dims: 4, Data: []float32{0.1, -2.5, 1000, 3.75, -7, 0, 0.5, 2e-3}},
+		[][]float64{{float64(float32(0.1)), -2.5, 1000, 3.75}, {-7, 0, 0.5, float64(float32(2e-3))}})
+	// As integers these bits are 13653, 49408, 25600, 1, 48128, 0, 14336, 31743.
+	checkDenseEncoder(t, vector.Slice[float16.Float16]{Dims: 4, Data: half(0x3555, 0xC100, 0x6400, 0x0001, 0xBC00, 0x0000, 0x3800, 0x7BFF)},
+		[][]float64{{0.333251953125, -2.5, 1024, math.Ldexp(1, -24)}, {-1, 0, 0.5, 65504}})
+	checkDenseEncoder(t, vector.Slice[int8]{Dims: 4, Data: []int8{-128, 127, -3, 5, 0, -1, 100, -100}},
+		[][]float64{{-128, 127, -3, 5}, {0, -1, 100, -100}})
+	checkDenseEncoder(t, vector.Slice[uint8]{Dims: 4, Data: []uint8{0, 255, 128, 200, 1, 127, 129, 64}},
+		[][]float64{{0, 255, 128, 200}, {1, 127, 129, 64}})
+
+	for name, errs := range map[string][4]error{
+		"zero dims":         encodeErr(vector.Slice[int8]{Data: []int8{1}}),
+		"negative dims":     encodeErr(vector.Slice[uint8]{Dims: -1, Data: []uint8{1}}),
+		"partial row":       encodeErr(vector.Slice[int8]{Dims: 2, Data: []int8{1, 2, 3}}),
+		"no rows":           encodeErr(vector.Slice[uint8]{Dims: 3}),
+		"float32 NaN":       encodeErr(vector.Slice[float32]{Dims: 2, Data: []float32{1, float32(math.NaN())}}),
+		"float32 -Inf":      encodeErr(vector.Slice[float32]{Dims: 1, Data: []float32{float32(math.Inf(-1))}}),
+		"float16 NaN":       encodeErr(vector.Slice[float16.Float16]{Dims: 2, Data: half(0x3C00, 0x7E00)}),
+		"float16 +Inf":      encodeErr(vector.Slice[float16.Float16]{Dims: 1, Data: half(0x7C00)}),
+		"norm past float32": encodeErr(vector.Slice[float32]{Dims: 2, Data: []float32{2e19, 0}}),
+	} {
+		for i, err := range errs {
+			if err == nil {
+				t.Errorf("%s: accepted as Dense[%s]", name, denseOutputs[i])
+			}
+		}
+	}
+	if _, err := (DenseEncoder[float32, float16.Float16]{}).Encode(vector.Slice[float32]{Dims: 1, Data: []float32{70000}}); err == nil {
+		t.Error("70000 encoded as a float16 block")
+	}
+}
+
+var denseOutputs = [4]string{"float32", "float16", "int8", "uint8"}
+
+// encodeErr is the error of encoding s into each Dense type, in
+// denseOutputs order, so a caller checks every output type on its own.
+func encodeErr[S vector.Scalar](s vector.Slice[S]) [4]error {
+	_, e1 := DenseEncoder[S, float32]{}.Encode(s)
+	_, e2 := DenseEncoder[S, float16.Float16]{}.Encode(s)
+	_, e3 := DenseEncoder[S, int8]{}.Encode(s)
+	_, e4 := DenseEncoder[S, uint8]{}.Encode(s)
+	return [4]error{e1, e2, e3, e4}
+}
+
+func checkDenseEncoder[S vector.Scalar](t *testing.T, src vector.Slice[S], values [][]float64) {
+	t.Helper()
+	qs := [][]float32{{0.25, -1, 3, 7}, {-300, 2, 0.5, 60000}, {0, 0, 0, 0}}
+	exact, err := DenseEncoder[S, float32]{}.Encode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range qs {
+		got := make([]float32, exact.Len())
+		exact.ScoreAll(q, got)
+		checkScores(t, "Dense[float32] of the source", got, wantScores(q, values), q, values, make([]float64, len(values)))
+	}
+	sameAsNewDense[S, float32](t, src, qs)
+	sameAsNewDense[S, float16.Float16](t, src, qs)
+	sameAsNewDense[S, int8](t, src, qs)
+	sameAsNewDense[S, uint8](t, src, qs)
+}
+
+// sameAsNewDense checks that Encode scores bit for bit as NewDense over
+// Float32Rows, leaves the source as it was, and does not see later writes
+// to it.
+func sameAsNewDense[S, T vector.Scalar](t *testing.T, src vector.Slice[S], qs [][]float32) {
+	t.Helper()
+	src.Data = slices.Clone(src.Data)
+	before := slices.Clone(src.Data)
+	got, err := DenseEncoder[S, T]{}.Encode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(src.Data, before) {
+		t.Fatal("Encode changed its input")
+	}
+	rows, err := src.Float32Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := NewDense[T](rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(src.Data)
+	if got.Len() != want.Len() || got.Dims() != want.Dims() {
+		t.Fatalf("shape %dx%d, NewDense %dx%d", got.Len(), got.Dims(), want.Len(), want.Dims())
+	}
+	a, b := make([]float32, got.Len()), make([]float32, got.Len())
+	for _, q := range qs {
+		got.ScoreAll(q, a)
+		want.ScoreAll(q, b)
+		for i := range a {
+			if math.Float32bits(a[i]) != math.Float32bits(b[i]) {
+				t.Fatalf("%T to %T row %d: Encode scores %v, NewDense %v", src.Data, got, i, a[i], b[i])
+			}
+		}
+	}
+}

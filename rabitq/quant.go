@@ -51,29 +51,39 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 		}
 	}
 	unit := opts.Metric == ivfq.Cosine
-	rows := len(vectors)
+	work := vectors
+	if unit {
+		work = make([][]float32, len(vectors))
+		for i, v := range vectors {
+			work[i] = workRow(v, true)
+		}
+	}
+	return Quantizer{Dims: dims, Code: quantize(len(work), dims, func(i int) []float32 { return work[i] }, unit, opts.Rotation)}, nil
+}
+
+// quantize is Quantize over n rows read by work, each in the frame it is
+// encoded in: unit vectors for cosine, the vectors themselves for l2, nil
+// for a zero vector in a cosine column, which has no unit form and so is
+// not a member of the mean and not a row the estimator speaks for. work is
+// read twice per row, once for the mean and once to encode, and may reuse
+// one buffer.
+func quantize(n, dims int, work func(i int) []float32, unit bool, rot *Rotation) *Code {
 	b := &Code{
-		Words:    make([]uint64, rows*bitWords(dims)),
+		Words:    make([]uint64, n*bitWords(dims)),
 		Centroid: make([]float32, dims),
-		Norms:    make([]float32, rows),
-		Aligns:   make([]float32, rows),
-		Seed:     opts.Rotation.seed,
+		Norms:    make([]float32, n),
+		Aligns:   make([]float32, n),
+		Seed:     rot.seed,
 		Unit:     unit,
 	}
-	// The rows the centroid is the mean of, in the frame they are encoded
-	// in: unit vectors for cosine, the vectors themselves for l2. A zero
-	// vector has no unit form, so it is not a member of the mean and not a
-	// row the estimator speaks for.
-	work := make([][]float32, rows)
 	sum := make([]float64, dims)
 	members := 0
-	for i, v := range vectors {
-		row := workRow(v, unit)
+	for i := range n {
+		row := work(i)
 		if row == nil {
 			b.Aligns[i] = zeroRowAlign
 			continue
 		}
-		work[i] = row
 		for j, x := range row {
 			sum[j] += float64(x)
 		}
@@ -84,8 +94,8 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 			b.Centroid[j] = float32(sum[j] / float64(members))
 		}
 	}
-	b.fillRows(work, opts.Rotation)
-	return Quantizer{Dims: dims, Code: b}, nil
+	b.fillRows(n, work, rot)
+	return b
 }
 
 // checkFrame is what every column's frame needs: a rotation of a positive

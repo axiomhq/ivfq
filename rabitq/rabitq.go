@@ -275,8 +275,9 @@ func (f *fastLayout) word(i, words int) uint64 {
 	return x
 }
 
-// fillRows encodes every non-nil row of work into the row of b at its
-// index: the stored norm ||o - c||, the rotated residual's sign bits, and
+// fillRows encodes every non-nil work(i), i < n, into row i of b, reading
+// each once and copying it out before the next read, so work may reuse one
+// buffer: the stored norm ||o - c||, the rotated residual's sign bits, and
 // the alignment. A norm of 0 (the row IS the centroid, or is within a
 // float32 ulp of it) stores no bits and an alignment of 0, the
 // no-norm-no-alignment agreement the reader checks; the test is on the
@@ -291,46 +292,46 @@ func (f *fastLayout) word(i, words int) uint64 {
 // operations in the same order as Rotation.Apply, and every row's sum adds
 // its terms in the same order as a row at a time would, so the codes are
 // bit-identical to fillRow's (TestFillRowsMatchesFillRow).
-func (b *Code) fillRows(work [][]float32, rot *Rotation) {
+func (b *Code) fillRows(n int, work func(i int) []float32, rot *Rotation) {
 	dims := len(b.Centroid)
 	w := bitWords(dims)
 	block := make([]float32, dims*simd.FillBlock) // block[j*simd.FillBlock+r]: dim j of the block's row r
 	words := make([]uint64, w*simd.FillBlock)     // words[g*simd.FillBlock+r]: sign word g of the block's row r
 	scale := math.Sqrt(float64(dims))
 	var rows [simd.FillBlock]int
-	for start := 0; start < len(work); {
-		n := 0
-		for ; start < len(work) && n < simd.FillBlock; start++ {
-			row := work[start]
+	for start := 0; start < n; {
+		m := 0
+		for ; start < n && m < simd.FillBlock; start++ {
+			row := work(start)
 			if row == nil {
 				continue // zero row in a cosine column
 			}
 			for j, c := range b.Centroid {
-				block[j*simd.FillBlock+n] = row[j] - c
+				block[j*simd.FillBlock+m] = row[j] - c
 			}
-			rows[n] = start
-			n++
+			rows[m] = start
+			m++
 		}
 		var norms, absSums [simd.FillBlock]float64
 		simd.BlockSumSq(block, dims, &norms)
-		for r, i := range rows[:n] {
+		for r, i := range rows[:m] {
 			norms[r] = math.Sqrt(norms[r])
 			b.Norms[i] = float32(norms[r]) // 0: the row IS the centroid, no bits, alignment 0
 		}
-		rot.applyBlock(block) // rows past n are stale and ignored
+		rot.applyBlock(block) // rows past m are stale and ignored
 		// Sign bits and |x| sums in vector registers, one row per lane: a
 		// residual's signs are coin flips, so a branch on each would
 		// mispredict half the time. |x| accumulates exactly what a row at a
 		// time's +x / -x does.
 		simd.BlockSignAbs(block, dims, &absSums, words)
 		for g := 0; g < w; g++ {
-			for r, i := range rows[:n] {
+			for r, i := range rows[:m] {
 				if b.Norms[i] != 0 {
 					b.Words[i*w+g] = words[g*simd.FillBlock+r]
 				}
 			}
 		}
-		for r, i := range rows[:n] {
+		for r, i := range rows[:m] {
 			if b.Norms[i] == 0 {
 				continue
 			}

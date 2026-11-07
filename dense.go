@@ -37,99 +37,134 @@ type Dense[T vector.Scalar] struct {
 // It copies them and keeps no float32 copy unless T is float32.
 func NewDense[T vector.Scalar](rows [][]float32) (Dense[T], error) {
 	if len(rows) == 0 || len(rows[0]) == 0 {
-		return Dense[T]{}, errors.New("ivfq: Dense needs at least one row of at least one dimension")
+		return Dense[T]{}, errEmptyDense
 	}
-	dims := len(rows[0])
-	lo, hi := math.Inf(1), math.Inf(-1)
 	for i, r := range rows {
-		if len(r) != dims {
-			return Dense[T]{}, fmt.Errorf("ivfq: row %d is %d-dimensional, want %d", i, len(r), dims)
+		if len(r) != len(rows[0]) {
+			return Dense[T]{}, fmt.Errorf("ivfq: row %d is %d-dimensional, want %d", i, len(r), len(rows[0]))
 		}
-		for j, x := range r {
+	}
+	return newDense[T](len(rows), len(rows[0]), func(i int, _ []float32) []float32 { return rows[i] })
+}
+
+// DenseEncoder is the Encoder from rows of S to Dense[T] blocks. Encode
+// reads S's values as float32 (float16 decoded as IEEE binary16), then
+// encodes them as NewDense[T] does, a row at a time: it borrows rows only
+// for the call, keeps nothing of them, and never builds a float32 copy of
+// the whole input.
+type DenseEncoder[S, T vector.Scalar] struct{}
+
+// Encode implements Encoder.
+func (DenseEncoder[S, T]) Encode(rows vector.Slice[S]) (Dense[T], error) {
+	n, err := rows.Rows()
+	if err != nil {
+		return Dense[T]{}, err
+	}
+	return newDense[T](n, rows.Dims, rows.Row)
+}
+
+var errEmptyDense = errors.New("ivfq: Dense needs at least one row of at least one dimension")
+
+// newDense is NewDense over n rows of dims values, row i read by row, which
+// may decode into the dims-wide scratch it is given.
+func newDense[T vector.Scalar](n, dims int, row func(i int, dst []float32) []float32) (Dense[T], error) {
+	if n == 0 || dims == 0 {
+		return Dense[T]{}, errEmptyDense
+	}
+	scratch := make([]float32, dims)
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for i := range n {
+		for j, x := range row(i, scratch) {
 			if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
 				return Dense[T]{}, fmt.Errorf("ivfq: row %d coordinate %d is %v", i, j, x)
 			}
 			lo, hi = min(lo, float64(x)), max(hi, float64(x))
 		}
 	}
-	d := Dense[T]{rows: vector.Slice[T]{Dims: dims, Data: make([]T, len(rows)*dims)}, scale: 1}
-	switch data := any(d.rows.Data).(type) {
-	case []float32:
-		for i, r := range rows {
-			copy(data[i*dims:], r)
-		}
-	case []float16.Float16:
-		for i, r := range rows {
-			for j, x := range r {
+	d := Dense[T]{rows: vector.Slice[T]{Dims: dims, Data: make([]T, n*dims)}, norms: make([]float32, n), scale: 1}
+	switch any(d.rows.Data).(type) {
+	case []int8:
+		d.scale, d.offset = affine(lo, hi, -128, 127)
+	case []uint8:
+		d.scale, d.offset = affine(lo, hi, 0, 255)
+	}
+	for i := range n {
+		src := row(i, scratch)
+		switch dst := any(d.rows.Data[i*dims : (i+1)*dims]).(type) {
+		case []float32:
+			copy(dst, src)
+		case []float16.Float16:
+			for j, x := range src {
 				h := float16.Fromfloat32(x)
 				if !h.IsFinite() {
 					return Dense[T]{}, fmt.Errorf("ivfq: row %d coordinate %d is %v, past float16's range", i, j, x)
 				}
-				data[i*dims+j] = h
+				dst[j] = h
 			}
+		case []int8:
+			encodeCodes(dst, src, d.scale, d.offset, -128, 127)
+		case []uint8:
+			encodeCodes(dst, src, d.scale, d.offset, 0, 255)
 		}
-	case []int8:
-		d.scale, d.offset = encodeCodes(data, rows, lo, hi, -128, 127)
-	case []uint8:
-		d.scale, d.offset = encodeCodes(data, rows, lo, hi, 0, 255)
-	}
-	block := d.decoded()
-	d.norms = make([]float32, len(rows))
-	for i := range d.norms {
-		r := block[i*dims : (i+1)*dims]
-		n, ok := finiteNorm(r)
+		norm, ok := finiteNorm(d.row(i, scratch))
 		if !ok {
-			return Dense[T]{}, fmt.Errorf("ivfq: row %d as encoded has squared norm %v", i, n)
+			return Dense[T]{}, fmt.Errorf("ivfq: row %d as encoded has squared norm %v", i, norm)
 		}
-		d.norms[i] = float32(n)
+		d.norms[i] = float32(norm)
 	}
 	return d, nil
 }
 
-// encodeCodes writes rows into codes on the affine scale mapping [lo, hi]
-// onto [cmin, cmax], and returns that scale and offset.
-func encodeCodes[C int8 | uint8](codes []C, rows [][]float32, lo, hi float64, cmin, cmax float64) (scale, offset float32) {
+// affine is the scale and offset mapping [lo, hi] onto codes [cmin, cmax].
+func affine(lo, hi, cmin, cmax float64) (scale, offset float32) {
 	scale = float32((hi - lo) / (cmax - cmin))
-	offset = float32(lo - float64(scale)*cmin)
-	dims := len(rows[0])
-	for i, r := range rows {
-		for j, x := range r {
-			c := cmin
-			if scale != 0 {
-				c = min(max(math.Round((float64(x)-float64(offset))/float64(scale)), cmin), cmax)
-			}
-			codes[i*dims+j] = C(c)
+	return scale, float32(lo - float64(scale)*cmin)
+}
+
+// encodeCodes writes src as codes on scale and offset, clamped to
+// [cmin, cmax].
+func encodeCodes[C int8 | uint8](codes []C, src []float32, scale, offset float32, cmin, cmax float64) {
+	for j, x := range src {
+		c := cmin
+		if scale != 0 {
+			c = min(max(math.Round((float64(x)-float64(offset))/float64(scale)), cmin), cmax)
 		}
+		codes[j] = C(c)
 	}
-	return scale, offset
+}
+
+// row returns row i as float32: a view of Data for float32, otherwise
+// decoded into dst, which it returns.
+func (d Dense[T]) row(i int, dst []float32) []float32 {
+	lo, hi := i*d.rows.Dims, (i+1)*d.rows.Dims
+	switch codes := any(d.rows.Data).(type) {
+	case []int8:
+		return decodeCodes(dst, codes[lo:hi], d.scale, d.offset)
+	case []uint8:
+		return decodeCodes(dst, codes[lo:hi], d.scale, d.offset)
+	}
+	return d.rows.Row(i, dst)
 }
 
 // decoded returns the rows as float32, row-major: Data itself for float32,
 // a new buffer otherwise.
 func (d Dense[T]) decoded() []float32 {
-	switch data := any(d.rows.Data).(type) {
-	case []float32:
+	if data, ok := any(d.rows.Data).([]float32); ok {
 		return data
-	case []float16.Float16:
-		out := make([]float32, len(data))
-		for i, h := range data {
-			out[i] = h.Float32()
-		}
-		return out
-	case []int8:
-		return decodeCodes(data, d.scale, d.offset)
-	case []uint8:
-		return decodeCodes(data, d.scale, d.offset)
 	}
-	panic("unreachable")
-}
-
-func decodeCodes[C int8 | uint8](codes []C, scale, offset float32) []float32 {
-	out := make([]float32, len(codes))
-	for i, c := range codes {
-		out[i] = float32(float64(offset) + float64(scale)*float64(c))
+	out := make([]float32, len(d.rows.Data))
+	for i := range d.norms {
+		d.row(i, out[i*d.rows.Dims:])
 	}
 	return out
+}
+
+func decodeCodes[C int8 | uint8](dst []float32, codes []C, scale, offset float32) []float32 {
+	dst = dst[:len(codes)]
+	for i, c := range codes {
+		dst[i] = float32(float64(offset) + float64(scale)*float64(c))
+	}
+	return dst
 }
 
 // Len is the number of rows.

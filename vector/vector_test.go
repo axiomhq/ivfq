@@ -39,25 +39,31 @@ func halves(bits ...uint16) []float16.Float16 {
 
 func TestFloat32Rows(t *testing.T) {
 	f32 := vector.Slice[float32]{Dims: 2, Data: []float32{0.1, -2.5, 3e38, -1e-38}}
+	// Read as integers, these bits are 15872, 50432, 1, 31743, 13653, 48128.
+	f16 := vector.Slice[float16.Float16]{Dims: 3, Data: halves(0x3E00, 0xC500, 0x0001, 0x7BFF, 0x3555, 0xBC00)}
+	i8 := vector.Slice[int8]{Dims: 2, Data: []int8{-128, 127, -1, 0, 5, -7}}
+	u8 := vector.Slice[uint8]{Dims: 3, Data: []uint8{255, 128, 0, 127, 200, 1}}
+	empty := vector.Slice[uint8]{Dims: 4}
 	cases := []struct {
-		name string
-		rows func() ([][]float32, error)
-		want [][]float32
+		name  string
+		rows  func() ([][]float32, error)
+		count func() (int, error)
+		row   func(int, []float32) []float32
+		want  [][]float32
 	}{
-		{"float32", f32.Float32Rows, [][]float32{{0.1, -2.5}, {3e38, -1e-38}}},
-		// Read as integers, these bits are 15872, 50432, 1, 31743, 13653, 48128.
-		{"float16", vector.Slice[float16.Float16]{Dims: 3, Data: halves(0x3E00, 0xC500, 0x0001, 0x7BFF, 0x3555, 0xBC00)}.Float32Rows,
-			[][]float32{{1.5, -5, 5.9604645e-08}, {65504, 0.33325195, -1}}},
-		{"int8", vector.Slice[int8]{Dims: 2, Data: []int8{-128, 127, -1, 0, 5, -7}}.Float32Rows,
-			[][]float32{{-128, 127}, {-1, 0}, {5, -7}}},
-		{"uint8", vector.Slice[uint8]{Dims: 3, Data: []uint8{255, 128, 0, 127, 200, 1}}.Float32Rows,
-			[][]float32{{255, 128, 0}, {127, 200, 1}}},
-		{"empty", vector.Slice[uint8]{Dims: 4}.Float32Rows, [][]float32{}},
+		{"float32", f32.Float32Rows, f32.Rows, f32.Row, [][]float32{{0.1, -2.5}, {3e38, -1e-38}}},
+		{"float16", f16.Float32Rows, f16.Rows, f16.Row, [][]float32{{1.5, -5, 5.9604645e-08}, {65504, 0.33325195, -1}}},
+		{"int8", i8.Float32Rows, i8.Rows, i8.Row, [][]float32{{-128, 127}, {-1, 0}, {5, -7}}},
+		{"uint8", u8.Float32Rows, u8.Rows, u8.Row, [][]float32{{255, 128, 0}, {127, 200, 1}}},
+		{"empty", empty.Float32Rows, empty.Rows, empty.Row, [][]float32{}},
 	}
 	for _, c := range cases {
 		got, err := c.rows()
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
+		}
+		if n, err := c.count(); err != nil || n != len(c.want) {
+			t.Fatalf("%s: Rows = %d, %v; want %d", c.name, n, err, len(c.want))
 		}
 		if len(got) != len(c.want) {
 			t.Fatalf("%s: %d rows, want %d", c.name, len(got), len(c.want))
@@ -65,6 +71,10 @@ func TestFloat32Rows(t *testing.T) {
 		for i := range got {
 			if !slices.Equal(got[i], c.want[i]) {
 				t.Fatalf("%s: row %d = %v, want %v", c.name, i, got[i], c.want[i])
+			}
+			dst := []float32{9, 9, 9, 9}
+			if r := c.row(i, dst); !slices.Equal(r, c.want[i]) {
+				t.Fatalf("%s: Row(%d) = %v, want %v", c.name, i, r, c.want[i])
 			}
 		}
 		if len(got) > 1 {
@@ -79,6 +89,9 @@ func TestFloat32Rows(t *testing.T) {
 	rows, _ := f32.Float32Rows()
 	if &rows[0][0] != &f32.Data[0] || &rows[1][0] != &f32.Data[2] {
 		t.Fatal("float32 rows copied their coordinates")
+	}
+	if r := f32.Row(1, nil); &r[0] != &f32.Data[2] || cap(r) != 2 {
+		t.Fatalf("float32 Row is not a capped view: cap %d", cap(r))
 	}
 	if !slices.Equal(f32.Data, []float32{0.1, -2.5, 3e38, -1e-38}) {
 		t.Fatalf("source changed: %v", f32.Data)
@@ -103,6 +116,15 @@ func TestFloat32RowsRejects(t *testing.T) {
 	} {
 		if got, err := rows(); err == nil {
 			t.Errorf("%s: accepted as %v", name, got)
+		}
+	}
+	for name, count := range map[string]func() (int, error){
+		"zero dims":     vector.Slice[float32]{Dims: 0, Data: []float32{1, 2}}.Rows,
+		"negative dims": vector.Slice[uint8]{Dims: -2, Data: []uint8{1, 2}}.Rows,
+		"partial row":   vector.Slice[int8]{Dims: 2, Data: []int8{1, 2, 3}}.Rows,
+	} {
+		if n, err := count(); err == nil {
+			t.Errorf("%s: Rows accepted as %d", name, n)
 		}
 	}
 }

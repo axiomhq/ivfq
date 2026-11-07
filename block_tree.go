@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/axiomhq/ivfq/vector"
 )
 
 // CentroidBlock is one tree node's centroid rows in an encoding the caller
@@ -21,6 +23,18 @@ type CentroidBlock interface {
 	Len() int
 	Dims() int
 	ScoreAll(query, scores []float32)
+}
+
+// Encoder encodes rows of S into a block B: DenseEncoder[S, T] makes
+// Dense[T] blocks, rabitq.BlockEncoder[S] rabitq.Blocks, from any source
+// scalar S. Encode borrows rows read-only for the call and returns a block
+// that owns its data, rows in input order; rows must not change during the
+// call.
+//
+// BuildTree's encoder takes float32 rows because a tree's internal rows are
+// fractional means: give it NewDense[T], or wrap an Encoder[float32, B].
+type Encoder[S vector.Scalar, B CentroidBlock] interface {
+	Encode(rows vector.Slice[S]) (B, error)
 }
 
 // Tree is FloatTree's hierarchy with every node's rows (child means for an

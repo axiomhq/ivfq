@@ -1,7 +1,9 @@
 package rabitq
 
 import (
+	"bytes"
 	"context"
+	"math"
 	"math/rand"
 	"slices"
 	"sort"
@@ -9,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/axiomhq/ivfq"
+	"github.com/axiomhq/ivfq/vector"
 	"github.com/x448/float16"
 )
 
@@ -116,5 +119,100 @@ func TestBlockShape(t *testing.T) {
 	}
 	if _, err := NewBlock(rows, nil); err == nil {
 		t.Fatal("a nil rotation was accepted")
+	}
+}
+
+var _ ivfq.Encoder[uint8, Block] = BlockEncoder[uint8]{}
+
+// blockSource is rows x dims random values of S, signed and fractional
+// where S allows, uint8 spanning past 127.
+func blockSource[S vector.Scalar](rows, dims int, seed int64) vector.Slice[S] {
+	rng := rand.New(rand.NewSource(seed))
+	data := make([]S, rows*dims)
+	for i := range data {
+		x := rng.NormFloat64() * 40
+		switch p := any(&data[i]).(type) {
+		case *float32:
+			*p = float32(x)
+		case *float16.Float16:
+			*p = float16.Fromfloat32(float32(x))
+		case *int8:
+			*p = int8(max(-128, min(127, math.Round(x))))
+		case *uint8:
+			*p = uint8(max(0, min(255, math.Round(x+128))))
+		}
+	}
+	return vector.Slice[S]{Dims: dims, Data: data}
+}
+
+// BlockEncoder makes exactly NewBlock's codes from any source scalar,
+// over more rows than one fill batch, without changing or keeping its
+// input.
+func TestBlockEncoder(t *testing.T) {
+	checkBlockEncoder(t, blockSource[float32](70, 40, 1))
+	checkBlockEncoder(t, blockSource[float16.Float16](70, 40, 2))
+	checkBlockEncoder(t, blockSource[int8](70, 40, 3))
+	checkBlockEncoder(t, blockSource[uint8](70, 40, 4))
+	checkBlockEncoder(t, vector.Slice[int8]{Dims: 40}) // no rows, as NewBlock allows
+
+	rot := NewRotation(5, 40)
+	ok := blockSource[float32](3, 40, 5)
+	nan := blockSource[float32](3, 40, 5)
+	nan.Data[77] = float32(math.NaN())
+	inf := blockSource[float16.Float16](3, 40, 6)
+	inf.Data[5] = float16.Frombits(0xFC00)
+	for name, err := range map[string]error{
+		"nil rotation":        encodeBlockErr(BlockEncoder[float32]{}, ok),
+		"rotation too narrow": encodeBlockErr(BlockEncoder[float32]{NewRotation(5, 39)}, ok),
+		"zero dims":           encodeBlockErr(BlockEncoder[int8]{rot}, vector.Slice[int8]{Data: []int8{1}}),
+		"partial row":         encodeBlockErr(BlockEncoder[uint8]{rot}, vector.Slice[uint8]{Dims: 40, Data: make([]uint8, 41)}),
+		"float32 NaN":         encodeBlockErr(BlockEncoder[float32]{rot}, nan),
+		"float16 -Inf":        encodeBlockErr(BlockEncoder[float16.Float16]{rot}, inf),
+	} {
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func encodeBlockErr[S vector.Scalar](e BlockEncoder[S], s vector.Slice[S]) error {
+	_, err := e.Encode(s)
+	return err
+}
+
+func checkBlockEncoder[S vector.Scalar](t *testing.T, src vector.Slice[S]) {
+	t.Helper()
+	rot := NewRotation(Seed("encoder"), src.Dims)
+	before := slices.Clone(src.Data)
+	got, err := BlockEncoder[S]{Rotation: rot}.Encode(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(src.Data, before) {
+		t.Fatal("Encode changed its input")
+	}
+	rows, err := src.Float32Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := NewBlock(rows, rot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBytes, _ := got.col.MarshalBinary()
+	clear(src.Data)
+	wantBytes, _ := want.col.MarshalBinary()
+	if !bytes.Equal(gotBytes, wantBytes) || got.Len() != want.Len() || got.Dims() != want.Dims() {
+		t.Fatalf("%T: Encode's codes differ from NewBlock's", src.Data)
+	}
+	if after, _ := got.col.MarshalBinary(); !bytes.Equal(after, gotBytes) {
+		t.Fatalf("%T: the block changed with its input", src.Data)
+	}
+	q := blockCorpus(1, src.Dims, 9)[0]
+	a, b := make([]float32, got.Len()), make([]float32, got.Len())
+	got.ScoreAll(q, a)
+	want.ScoreAll(q, b)
+	if !slices.EqualFunc(a, b, func(x, y float32) bool { return math.Float32bits(x) == math.Float32bits(y) }) {
+		t.Fatalf("%T: scores differ from NewBlock's", src.Data)
 	}
 }

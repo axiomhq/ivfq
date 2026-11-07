@@ -34,11 +34,8 @@ type Slice[T Scalar] struct {
 // in use. Float32Rows does not modify Data. Each row's capacity is its
 // length, so appending to a row copies it instead of overwriting the next.
 func (s Slice[T]) Float32Rows() ([][]float32, error) {
-	if s.Dims <= 0 {
-		return nil, fmt.Errorf("vector: dims must be positive, got %d", s.Dims)
-	}
-	if len(s.Data)%s.Dims != 0 {
-		return nil, fmt.Errorf("vector: %d values are not whole %d-wide rows", len(s.Data), s.Dims)
+	if _, err := s.Rows(); err != nil {
+		return nil, err
 	}
 	var flat []float32
 	switch d := any(s.Data).(type) {
@@ -50,9 +47,9 @@ func (s Slice[T]) Float32Rows() ([][]float32, error) {
 			flat[i] = h.Float32()
 		}
 	case []int8:
-		flat = widen(d)
+		flat = widenInto(make([]float32, len(d)), d)
 	case []uint8:
-		flat = widen(d)
+		flat = widenInto(make([]float32, len(d)), d)
 	}
 	for i, x := range flat {
 		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
@@ -66,10 +63,45 @@ func (s Slice[T]) Float32Rows() ([][]float32, error) {
 	return rows, nil
 }
 
-func widen[T int8 | uint8](d []T) []float32 {
-	out := make([]float32, len(d))
-	for i, x := range d {
-		out[i] = float32(x)
+// Rows is the number of rows in s, or an error when Dims is not positive or
+// Data does not hold whole rows. It reads no values.
+func (s Slice[T]) Rows() (int, error) {
+	if s.Dims <= 0 {
+		return 0, fmt.Errorf("vector: dims must be positive, got %d", s.Dims)
 	}
-	return out
+	if len(s.Data)%s.Dims != 0 {
+		return 0, fmt.Errorf("vector: %d values are not whole %d-wide rows", len(s.Data), s.Dims)
+	}
+	return len(s.Data) / s.Dims, nil
+}
+
+// Row returns row i as the float32 values Float32Rows gives it, one row
+// at a time: for float32 a read-only view of Data whose capacity is its
+// length (dst is unused), for other types row i decoded into dst[:Dims],
+// which it returns. It does not check that values are finite. i must be a
+// row of s and, unless T is float32, dst at least Dims long.
+func (s Slice[T]) Row(i int, dst []float32) []float32 {
+	lo, hi := i*s.Dims, (i+1)*s.Dims
+	switch d := any(s.Data).(type) {
+	case []float32:
+		return d[lo:hi:hi]
+	case []float16.Float16:
+		dst = dst[:s.Dims]
+		for j, h := range d[lo:hi] {
+			dst[j] = h.Float32()
+		}
+		return dst
+	case []int8:
+		return widenInto(dst[:s.Dims], d[lo:hi])
+	case []uint8:
+		return widenInto(dst[:s.Dims], d[lo:hi])
+	}
+	panic("unreachable")
+}
+
+func widenInto[T int8 | uint8](dst []float32, d []T) []float32 {
+	for j, x := range d {
+		dst[j] = float32(x)
+	}
+	return dst
 }
