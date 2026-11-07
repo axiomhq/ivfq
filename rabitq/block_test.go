@@ -120,6 +120,9 @@ func TestBlockShape(t *testing.T) {
 	if _, err := NewBlock(rows, nil); err == nil {
 		t.Fatal("a nil rotation was accepted")
 	}
+	if _, err := NewBlock([][]float32{{1, 2, 3, float32(math.NaN())}}, rot); err == nil {
+		t.Fatal("a NaN row was accepted")
+	}
 }
 
 var _ ivfq.Encoder[uint8, Block] = BlockEncoder[uint8]{}

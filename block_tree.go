@@ -31,8 +31,9 @@ type CentroidBlock interface {
 // that owns its data, rows in input order; rows must not change during the
 // call.
 //
-// BuildTree's encoder takes float32 rows because a tree's internal rows are
-// fractional means: give it NewDense[T], or wrap an Encoder[float32, B].
+// BuildTree does not take an Encoder: a tree's internal rows are fractional
+// means held as [][]float32, so its encoder is NewDense[T] or a closure
+// over rabitq.NewBlock.
 type Encoder[S vector.Scalar, B CentroidBlock] interface {
 	Encode(rows vector.Slice[S]) (B, error)
 }

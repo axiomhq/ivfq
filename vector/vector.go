@@ -1,7 +1,9 @@
 // Package vector is the typed input shape for dense rows: one flat,
 // row-major buffer of a supported scalar type and its width. Float32Rows
-// turns it into the [][]float32 rows kmeans, rabitq and the root package
-// take, so those entry points stay float32.
+// turns it into the [][]float32 rows kmeans, rabitq and the root package's
+// float32 entry points take; Rows and Row read it a row at a time, which
+// is how the typed encoders (ivfq.DenseEncoder, rabitq.BlockEncoder) avoid
+// a float32 copy of the whole input.
 //
 // It imports nothing from this module, so every other package may use it.
 package vector

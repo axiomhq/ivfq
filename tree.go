@@ -873,11 +873,10 @@ func finiteNorm(v []float32) (float64, bool) {
 }
 
 // nearestHolder descends the hierarchy the way nearestInto does — same
-// scan-by-norm-identity ranking, same selectNearest beam, beam = fanout —
-// but keeps the visited leaf holders instead of their leaves, and returns
-// the holder whose centroid is nearest to q (ties by lower id, -1 for an
-// empty tree). Upsert appends place new leaves with it; nothing else
-// exposes it.
+// scan-by-norm-identity ranking, beam = fanout — but keeps the visited
+// leaf holders instead of their leaves, and returns the holder whose
+// centroid is nearest to q (ties by lower id, -1 for an empty tree).
+// Upsert's appends and replaces place leaves with it.
 func (t FloatTree) nearestHolder(q []float32) int {
 	if len(t.nodes) == 0 || len(q) != t.dims {
 		return -1

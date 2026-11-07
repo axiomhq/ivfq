@@ -21,11 +21,17 @@ type Block struct {
 	rot *Rotation
 }
 
-// NewBlock encodes rows for squared-L2 routing in rot's frame. With rot
+// NewBlock encodes rows, which must be finite, for squared-L2 routing in
+// rot's frame. With rot
 // fixed it is BuildTree's encoder:
 //
 //	func(rows [][]float32) (rabitq.Block, error) { return rabitq.NewBlock(rows, rot) }
 func NewBlock(rows [][]float32, rot *Rotation) (Block, error) {
+	for i, r := range rows {
+		if err := checkFinite(i, r); err != nil {
+			return Block{}, err
+		}
+	}
 	// Not PackFastScan: at fanout 16 it padded a tree's codes to 1.6x
 	// their bytes for about 10% faster routing.
 	col, err := Quantize(rows, Options{Metric: ivfq.L2, Rotation: rot})
@@ -56,10 +62,8 @@ func (e BlockEncoder[S]) Encode(rows vector.Slice[S]) (Block, error) {
 	}
 	scratch := make([]float32, rows.Dims)
 	for i := range n {
-		for j, x := range rows.Row(i, scratch) {
-			if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-				return Block{}, fmt.Errorf("rabitq: row %d coordinate %d is %v", i, j, x)
-			}
+		if err := checkFinite(i, rows.Row(i, scratch)); err != nil {
+			return Block{}, err
 		}
 	}
 	code := quantize(n, rows.Dims, func(i int) []float32 { return rows.Row(i, scratch) }, false, e.Rotation)
@@ -79,4 +83,14 @@ func (b Block) Dims() int { return b.col.Dims }
 func (b Block) ScoreAll(query, scores []float32) {
 	s := b.col.Scorer(NewQuery(query, ivfq.L2, b.rot))
 	s.ScoreAll(scores, nil)
+}
+
+// checkFinite reports row i's first NaN or infinite coordinate.
+func checkFinite(i int, row []float32) error {
+	for j, x := range row {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return fmt.Errorf("rabitq: row %d coordinate %d is %v", i, j, x)
+		}
+	}
+	return nil
 }
