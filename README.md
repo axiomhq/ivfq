@@ -11,7 +11,7 @@ clusters, the codes and the scan.
 
 | package | what it holds |
 | --- | --- |
-| `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid trees (`FloatTree`; `Tree[B]` over `Dense[T]` blocks), the centroid codec, and the distance vocabulary (`Metric`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
+| `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid trees (`FloatTree`; `Tree[B]` over any `EmbeddingBatch`, such as `Dense[T]`), the centroid codec, and the distance vocabulary (`Metric`, `Embedding`, `EmbeddingBatch`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
 | `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids; `Config.FitBalanced` for splits |
 | `rabitq` | 1-bit RaBitQ codes, one bit per dimension plus two float32 per row: `Quantize`, `Quantizer`, `Scorer`, `Rotation`, and `Block` for `ivfq.Tree` |
 | `rank` | top-k selection |
@@ -48,12 +48,20 @@ small, err := ivfq.BuildTree(ctx, centroids, 32, ivfq.NewDense[int8])
 bits, err := ivfq.BuildTree(ctx, centroids, 32, func(rows [][]float32) (rabitq.Block, error) {
 	return rabitq.NewBlock(rows, rot)
 })
-probe := bits.Nearest(query, beam, ivfq.DefaultNprobe(k))
+q, err := ivfq.NewDense[float32]([][]float32{query}) // a dense query
+probe, err := bits.Nearest(q.At(0), beam, ivfq.DefaultNprobe(k))
 ```
 
-`Dense[float32]` routes exactly as `FloatTree`; `float16`, `int8` and
-`uint8` blocks round (integer blocks on one affine scale per block), and
-`rabitq.Block` ranks by 1-bit estimates, so it misses some exact
+Every block is an `EmbeddingBatch`: `ScoreAll(query, metric, dst)` scores a
+dense query (`DenseEmbedding` of any scalar) against all its rows, higher
+is better, and `At(i)` is row i as an `Embedding`. `Dense` scores L2,
+cosine and inner product of its decoded rows; `rabitq.Block` holds L2
+codes and scores only the L2 estimate. A tree always routes by L2.
+
+`Dense[float32]` routes exactly as `FloatTree`, except that a score
+overflowing to infinity, which `FloatTree` ranks last, is an error.
+`float16`, `int8` and `uint8` blocks round (integer blocks on one affine
+scale per block), and `rabitq.Block` ranks by 1-bit estimates, so it misses some exact
 neighbours and a dropped branch cannot be reranked back. A `Tree` keeps no
 float32 copy of the centroids: keep your own if you need them.
 

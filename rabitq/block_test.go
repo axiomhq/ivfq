@@ -15,6 +15,34 @@ import (
 	"github.com/x448/float16"
 )
 
+// dq is q as a dense float32 query.
+func dq(t testing.TB, q []float32) ivfq.Embedding {
+	t.Helper()
+	d, err := ivfq.NewDense[float32]([][]float32{q})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d.At(0)
+}
+
+// nearest is tr.Nearest(dq(q), beam, probe), failing t on an error.
+func nearest[B ivfq.EmbeddingBatch](t testing.TB, tr ivfq.Tree[B], q []float32, beam, probe int) []int {
+	t.Helper()
+	ids, err := tr.Nearest(dq(t, q), beam, probe)
+	if err != nil {
+		t.Error(err)
+	}
+	return ids
+}
+
+// scoreL2 is b.ScoreAll(dq(q), L2, dst), failing t on an error.
+func scoreL2(t testing.TB, b ivfq.EmbeddingBatch, q []float32, dst []float32) {
+	t.Helper()
+	if err := b.ScoreAll(dq(t, q), ivfq.L2, dst); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // blockCorpus is n leaf centroids around 32 shared centers, with unit noise.
 func blockCorpus(n, dims int, seed int64) [][]float32 {
 	rng := rand.New(rand.NewSource(seed))
@@ -63,7 +91,7 @@ func TestBlockTreeRecallAgainstRawCentroids(t *testing.T) {
 			}
 		}
 		sort.SliceStable(ids, func(a, b int) bool { return d[ids[a]] < d[ids[b]] })
-		got[i] = tree.Nearest(q, 64, probe)
+		got[i] = nearest(t, tree, q, 64, probe)
 		for _, id := range ids[:topk] {
 			if slices.Contains(got[i], id) {
 				covered++
@@ -82,13 +110,13 @@ func TestBlockTreeRecallAgainstRawCentroids(t *testing.T) {
 	}
 	halfWant := make([][]int, len(queries))
 	for i, q := range queries {
-		halfWant[i] = half.Nearest(q, 8, topk)
+		halfWant[i] = nearest(t, half, q, 8, topk)
 	}
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
 			for i, q := range queries {
-				if !slices.Equal(tree.Nearest(q, 64, probe), got[i]) || !slices.Equal(half.Nearest(q, 8, topk), halfWant[i]) {
+				if !slices.Equal(nearest(t, tree, q, 64, probe), got[i]) || !slices.Equal(nearest(t, half, q, 8, topk), halfWant[i]) {
 					t.Error("a concurrent search disagreed")
 					return
 				}
@@ -110,7 +138,7 @@ func TestBlockShape(t *testing.T) {
 	}
 	q := []float32{0.5, -1, 2, 3}
 	scores := []float32{7, 7, 7, 7, 7}
-	b.ScoreAll(q, scores)
+	scoreL2(t, b, q, scores)
 	if scores[3] != 7 || scores[4] != 7 || !slices.Equal(q, []float32{0.5, -1, 2, 3}) {
 		t.Fatalf("ScoreAll wrote past Len or into the query: %v %v", scores, q)
 	}
@@ -213,9 +241,181 @@ func checkBlockEncoder[S vector.Scalar](t *testing.T, src vector.Slice[S]) {
 	}
 	q := blockCorpus(1, src.Dims, 9)[0]
 	a, b := make([]float32, got.Len()), make([]float32, got.Len())
-	got.ScoreAll(q, a)
-	want.ScoreAll(q, b)
+	scoreL2(t, got, q, a)
+	scoreL2(t, want, q, b)
 	if !slices.EqualFunc(a, b, func(x, y float32) bool { return math.Float32bits(x) == math.Float32bits(y) }) {
 		t.Fatalf("%T: scores differ from NewBlock's", src.Data)
+	}
+}
+
+// typedQuery is q as a dense query of scalar T, and the float32 values it
+// decodes to.
+func typedQuery[T vector.Scalar](t *testing.T, q []float32) (ivfq.Embedding, []float32) {
+	t.Helper()
+	d, err := ivfq.NewDense[T]([][]float32{q})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := d.At(0).(ivfq.DenseEmbedding[T])
+	v := make([]float32, len(q))
+	if err := e.Decode(v); err != nil {
+		t.Fatal(err)
+	}
+	return e, v
+}
+
+// A Block scores every dense query type as the RaBitQ L2 estimate of the
+// values the query decodes to, the Scorer's estimate bit for bit (not its
+// bound); At(i).Score agrees; ScoreAll writes only dst[:Len()].
+func TestBlockScoresTypedQueries(t *testing.T) {
+	const dims = 48
+	rot := NewRotation(Seed("typed", "query"), dims)
+	rows := blockCorpus(40, dims, 11)
+	b, err := NewBlock(rows, rot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := blockCorpus(1, dims, 12)[0]
+	for j := range raw {
+		raw[j] *= 10 // past 127 and below zero once rounded to integers
+	}
+	var qs []ivfq.Embedding
+	var vals [][]float32
+	for _, f := range []func(*testing.T, []float32) (ivfq.Embedding, []float32){
+		typedQuery[float32], typedQuery[float16.Float16], typedQuery[int8], typedQuery[uint8],
+	} {
+		q, v := f(t, raw)
+		qs, vals = append(qs, q), append(vals, v)
+	}
+	for k, q := range qs {
+		want := make([]float32, b.Len())
+		sc := b.col.Scorer(NewQuery(vals[k], ivfq.L2, rot))
+		for i := range want {
+			want[i] = sc.Score(i)
+		}
+		dst := make([]float32, b.Len()+2)
+		dst[b.Len()], dst[b.Len()+1] = 9, 9
+		if err := b.ScoreAll(q, ivfq.L2, dst); err != nil {
+			t.Fatalf("%T: %v", q, err)
+		}
+		if dst[b.Len()] != 9 || dst[b.Len()+1] != 9 {
+			t.Fatalf("%T: ScoreAll wrote past Len", q)
+		}
+		for i := range want {
+			one, err := b.At(i).Score(q, ivfq.L2)
+			if err != nil || math.Float32bits(dst[i]) != math.Float32bits(want[i]) || one != dst[i] {
+				t.Fatalf("%T row %d: ScoreAll %v, Score %v (%v), Scorer %v", q, i, dst[i], one, err, want[i])
+			}
+		}
+	}
+}
+
+// Dense and RaBitQ scores of one query over the same rows are on one
+// scale: the estimate tracks the exact -‖q-row‖², sign and magnitude, so a
+// caller may compare scores across the two encodings.
+func TestBlockAndDenseScoresComparable(t *testing.T) {
+	const dims = 96
+	rows := blockCorpus(300, dims, 21)
+	b, err := NewBlock(rows, NewRotation(Seed("mixed"), dims))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := ivfq.NewDense[float32](rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var off, mag float64
+	for _, q := range blockCorpus(20, dims, 22) {
+		est, exact := make([]float32, len(rows)), make([]float32, len(rows))
+		scoreL2(t, b, q, est)
+		scoreL2(t, d, q, exact)
+		for i, r := range rows {
+			var want float64
+			for j := range r {
+				x := float64(q[j]) - float64(r[j])
+				want -= x * x
+			}
+			if math.Abs(float64(exact[i])-want) > 1e-4*math.Abs(want) {
+				t.Fatalf("Dense row %d: %v, want %v", i, exact[i], want)
+			}
+			off += math.Abs(float64(est[i]) - want)
+			mag += math.Abs(want)
+		}
+	}
+	// Measured 0.062; a sign, scale or frame mistake is near 1 or more.
+	if r := off / mag; r > 0.15 {
+		t.Fatalf("RaBitQ estimates are off by %.3f of the exact scores", r)
+	}
+}
+
+// A Block fails, rather than scoring, for a metric its L2 codes do not
+// hold, a query of another width or representation, a short dst or a zero
+// Block; At panics outside the rows.
+func TestBlockScoreErrors(t *testing.T) {
+	rot := NewRotation(3, 4)
+	b, err := NewBlock([][]float32{{1, 2, 3, 4}, {-1, 0, 2, 5}}, rot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := dq(t, []float32{0.5, -1, 2, 3})
+	ok := make([]float32, 2)
+	for name, err := range map[string]error{
+		"cosine":        b.ScoreAll(q, ivfq.Cosine, ok),
+		"inner product": b.ScoreAll(q, ivfq.InnerProduct, ok),
+		"3-wide query":  b.ScoreAll(dq(t, []float32{1, 2, 3}), ivfq.L2, ok),
+		"code query":    b.ScoreAll(b.At(0), ivfq.L2, ok),
+		"nil query":     b.ScoreAll(nil, ivfq.L2, ok),
+		"typed nil":     b.ScoreAll((*ivfq.DenseEmbedding[float32])(nil), ivfq.L2, ok),
+		"short dst":     b.ScoreAll(q, ivfq.L2, ok[:1]),
+		"zero Block":    Block{}.ScoreAll(q, ivfq.L2, ok),
+		"row cosine":    func() error { _, err := b.At(1).Score(q, ivfq.Cosine); return err }(),
+		"row as query":  func() error { _, err := b.At(1).Score(b.At(0), ivfq.L2); return err }(),
+	} {
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	for _, i := range []int{-1, 2} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("At(%d) of 2 rows did not panic", i)
+				}
+			}()
+			b.At(i)
+		}()
+	}
+}
+
+// BenchmarkBlockScoreAll is one dense query against a 256 x 128 Block,
+// the per-node work of a RaBitQ tree search, query decode and preparation
+// included.
+func BenchmarkBlockScoreAll(b *testing.B) {
+	rows := blockCorpus(256, 128, 1)
+	blk, err := NewBlock(rows, NewRotation(Seed("bench"), 128))
+	if err != nil {
+		b.Fatal(err)
+	}
+	dst := make([]float32, len(rows))
+	for _, name := range []string{"float32", "int8"} {
+		var q ivfq.Embedding
+		raw := blockCorpus(1, 128, 2)[0]
+		if name == "float32" {
+			q = dq(b, raw)
+		} else {
+			d, err := ivfq.NewDense[int8]([][]float32{raw})
+			if err != nil {
+				b.Fatal(err)
+			}
+			q = d.At(0)
+		}
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if err := blk.ScoreAll(q, ivfq.L2, dst); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

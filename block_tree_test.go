@@ -38,7 +38,7 @@ func TestTreeDenseFloat32MatchesFloatTree(t *testing.T) {
 		for _, beam := range []int{1, 3, 8, 64} {
 			for _, probe := range []int{1, 5, 40} {
 				want, _ := ft.EvaluationsBeam(q, beam, probe)
-				if got := tr.Nearest(q, beam, probe); !slices.Equal(got, want) {
+				if got := treeNearest(t, tr, q, beam, probe); !slices.Equal(got, want) {
 					t.Fatalf("beam %d probe %d: got %v, FloatTree %v", beam, probe, got, want)
 				}
 			}
@@ -74,6 +74,7 @@ func TestTreeLeafIdentityAndTies(t *testing.T) {
 		return ids
 	}
 	check := func(name string, nearest func(q []float32, beam, probe int) []int) {
+		t.Helper()
 		for range 50 {
 			q := []float32{float32(rng.Intn(5) - 1), float32(rng.Intn(5) - 1), float32(rng.Intn(5) - 1)}
 			want := exact(q)
@@ -97,8 +98,8 @@ func TestTreeLeafIdentityAndTies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("float32", f32.Nearest)
-	check("float16", f16.Nearest)
+	check("float32", func(q []float32, beam, probe int) []int { return treeNearest(t, f32, q, beam, probe) })
+	check("float16", func(q []float32, beam, probe int) []int { return treeNearest(t, f16, q, beam, probe) })
 }
 
 // BuildTree keeps nothing of the caller's centroids, returns fresh results,
@@ -118,20 +119,23 @@ func TestBuildTreeContract(t *testing.T) {
 			t.Fatalf("BuildTree changed centroid %d", i)
 		}
 	}
-	want := tr.Nearest(q, 4, 10)
+	want := treeNearest(t, tr, q, 4, 10)
 	for _, v := range vs {
 		clear(v)
 	}
-	got := tr.Nearest(q, 4, 10)
+	got := treeNearest(t, tr, q, 4, 10)
 	if !slices.Equal(got, want) || tr.Leaves() != 300 || tr.Dims() != 8 {
 		t.Fatalf("after clearing the input: %v, want %v", got, want)
 	}
 	got[0] = -1
-	if again := tr.Nearest(q, 4, 10); !slices.Equal(again, want) {
+	if again := treeNearest(t, tr, q, 4, 10); !slices.Equal(again, want) {
 		t.Fatalf("results alias: %v", again)
 	}
-	if tr.Nearest(q[:7], 4, 10) != nil || tr.Nearest(q, 0, 10) != nil || tr.Nearest(q, 4, 0) != nil {
-		t.Fatal("bad width, beam or probe returned leaves")
+	if ids, err := tr.Nearest(dq(t, q[:7]), 4, 10); err == nil || ids != nil {
+		t.Fatalf("a 7-wide query: %v, %v", ids, err)
+	}
+	if treeNearest(t, tr, q, 0, 10) != nil || treeNearest(t, tr, q, 4, 0) != nil {
+		t.Fatal("a beam or probe below one returned leaves")
 	}
 
 	vs = treeRand(300, 8, 5)
@@ -181,7 +185,75 @@ func TestBuildTreeContract(t *testing.T) {
 		t.Fatal("a NaN centroid was accepted")
 	}
 	empty, err := BuildTree(ctx, nil, 4, NewDense[float32])
-	if err != nil || empty.Nearest(nil, 1, 1) != nil || empty.Leaves() != 0 {
+	if ids, nerr := empty.Nearest(nil, 1, 1); err != nil || nerr != nil || ids != nil || empty.Leaves() != 0 {
 		t.Fatalf("empty tree: %v", err)
+	}
+}
+
+// failingBatch is a Dense[float32] that, when fail is set, writes
+// plausible scores and then returns an error.
+type failingBatch struct {
+	Dense[float32]
+	fail bool
+}
+
+var errScore = errors.New("scoring failed")
+
+func (b failingBatch) ScoreAll(q Embedding, m Metric, dst []float32) error {
+	if err := b.Dense.ScoreAll(q, m, dst); err != nil || !b.fail {
+		return err
+	}
+	return errScore
+}
+
+// Nearest returns the first ScoreAll error with no ids, even when only a
+// leaf holder deep in the tree fails after internal nodes scored fine; it
+// never ranks partly written scores. A search that does not reach the
+// failing block is unaffected.
+func TestTreeNearestPropagatesScoreErrors(t *testing.T) {
+	ctx := context.Background()
+	vs := treeRand(400, 8, 7)
+	tr, err := BuildTree(ctx, vs, 4, func(rows [][]float32) (failingBatch, error) {
+		d, err := NewDense[float32](rows)
+		holdsLeaf0 := false
+		for _, r := range rows {
+			holdsLeaf0 = holdsLeaf0 || &r[0] == &vs[0][0] // a leaf holder's rows are the input rows
+		}
+		return failingBatch{d, holdsLeaf0}, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := tr.Nearest(dq(t, vs[0]), len(vs), len(vs))
+	if !errors.Is(err, errScore) || ids != nil {
+		t.Fatalf("a search through the failing holder: %v, %v", ids, err)
+	}
+	if ids, err := tr.Nearest(dq(t, vs[0]), 1, 1); err != nil && !errors.Is(err, errScore) || err == nil && len(ids) != 1 {
+		t.Fatalf("beam 1: %v, %v", ids, err)
+	}
+	reached := 0
+	for _, q := range treeRand(50, 8, 8) {
+		ids, err := tr.Nearest(dq(t, q), 1, 3)
+		switch {
+		case errors.Is(err, errScore):
+			reached++
+		case err != nil || len(ids) == 0 || slices.Contains(ids, 0):
+			t.Fatalf("a search missing the failing holder: %v, %v", ids, err)
+		}
+	}
+	if reached == 50 {
+		t.Fatal("every beam-1 search reached one leaf holder")
+	}
+	// Only internal nodes fail: their rows are means, not input rows.
+	internal, err := BuildTree(ctx, vs, 4, func(rows [][]float32) (failingBatch, error) {
+		d, err := NewDense[float32](rows)
+		isLeaf := slices.ContainsFunc(vs, func(v []float32) bool { return &v[0] == &rows[0][0] })
+		return failingBatch{d, !isLeaf}, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := internal.Nearest(dq(t, vs[3]), 4, 10); !errors.Is(err, errScore) || ids != nil {
+		t.Fatalf("failing internal nodes: %v, %v", ids, err)
 	}
 }

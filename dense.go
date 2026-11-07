@@ -9,22 +9,28 @@ import (
 	"github.com/x448/float16"
 )
 
-// Dense is a CentroidBlock of rows stored as T and decoded to float32 to
+// Dense is an EmbeddingBatch of rows stored as T and decoded to float32 to
 // score. NewDense[T] is its encoder for BuildTree.
 //
 // float32 rows are kept exactly. float16 rows are rounded to the nearest
 // IEEE binary16 value; a coordinate that rounds past ±65504 (|x| ≥ 65520)
-// is an error, not an infinity. int8 and uint8 rows are codes on one affine scale per
-// block, because tree means are fractional: the block's [min, max]
-// coordinate range maps onto all 256 codes, scale = (max-min)/255 and
-// offset = min - scale*(T's minimum), a coordinate x is stored as
-// round((x-offset)/scale), halves away from zero, clamped to T's range,
-// and decodes to offset + scale*code, within scale/2 of x up to float32
-// rounding. A block whose coordinates are all equal decodes them exactly.
+// is an error, not an infinity. int8 and uint8 rows are codes on one
+// affine scale per block, because tree means are fractional: the block's
+// [min, max] coordinate range maps onto all 256 codes, scale =
+// (max-min)/255 and offset = min - scale*(T's minimum), a coordinate x is
+// stored as round((x-offset)/scale), halves away from zero, clamped to
+// T's range, and decodes to offset + scale*code, within scale/2 of x up
+// to float32 rounding. A block whose coordinates are all equal decodes
+// them exactly.
 //
-// ScoreAll scores the decoded rows exactly as a Dense[float32] of them
-// would: -(‖q‖² + ‖row‖² - 2·q·row), combined in float64, FloatTree's
-// ranking distance negated.
+// Scores are of the decoded rows, not the coordinates before encoding,
+// exactly as a Dense[float32] of the decoded rows would score them:
+// -(‖q‖² + ‖row‖² - 2·q·row) for L2, from float32 q·row and squared norms
+// combined in float64 (FloatTree's ranking distance negated); q·row for
+// InnerProduct; and q·row/(‖q‖‖row‖) from the same terms for Cosine,
+// except that a row or query whose squared norm is under 2⁻⁶⁰ is summed
+// wholly in float64, so a tiny nonzero vector is not mistaken for zero.
+// Cosine is 0 when either vector is exactly zero.
 type Dense[T vector.Scalar] struct {
 	rows          vector.Slice[T]
 	norms         []float32 // squared norm of each decoded row
@@ -146,19 +152,6 @@ func (d Dense[T]) row(i int, dst []float32) []float32 {
 	return d.rows.Row(i, dst)
 }
 
-// decoded returns the rows as float32, row-major: Data itself for float32,
-// a new buffer otherwise.
-func (d Dense[T]) decoded() []float32 {
-	if data, ok := any(d.rows.Data).([]float32); ok {
-		return data
-	}
-	out := make([]float32, len(d.rows.Data))
-	for i := range d.norms {
-		d.row(i, out[i*d.rows.Dims:])
-	}
-	return out
-}
-
 func decodeCodes[C int8 | uint8](dst []float32, codes []C, scale, offset float32) []float32 {
 	dst = dst[:len(codes)]
 	for i, c := range codes {
@@ -173,23 +166,129 @@ func (d Dense[T]) Len() int { return len(d.norms) }
 // Dims is the width of every row.
 func (d Dense[T]) Dims() int { return d.rows.Dims }
 
-// ScoreAll implements CentroidBlock. query must be finite with a finite
-// float32 squared norm, as FloatTree's searches assume; otherwise scores
-// are NaN. A finite query far from a row can still score -Inf, which ranks
-// it last. It decodes a non-float32 block into scratch of its own on every
-// call.
-//
-// ponytail: per-call decode makes non-float32 routing about 8-13x slower
-// than float32 (measured at 4096x128 leaves, fanout 16, beam 16); pool the scratch or
-// score codes without decoding if a profile asks.
-func (d Dense[T]) ScoreAll(query, scores []float32) {
-	if len(query) != d.rows.Dims || len(scores) < len(d.norms) {
-		panic(fmt.Sprintf("ivfq: Dense.ScoreAll: %d-wide query and %d scores for %d rows of %d", len(query), len(scores), len(d.norms), d.rows.Dims))
+// At implements EmbeddingBatch.
+func (d Dense[T]) At(i int) Embedding {
+	if i < 0 || i >= len(d.norms) {
+		panic(fmt.Sprintf("ivfq: Dense.At(%d) of %d rows", i, len(d.norms)))
 	}
-	scores = scores[:len(d.norms)]
-	Dots(query, d.decoded(), scores)
-	qq := float64(Dot(query, query))
-	for i, dot := range scores {
-		scores[i] = -float32(qq + float64(d.norms[i]) - 2*float64(dot))
+	return DenseEmbedding[T]{d: d, i: i}
+}
+
+// ScoreAll implements EmbeddingBatch for a dense query, a DenseEmbedding
+// of any scalar, under L2, Cosine or InnerProduct. It reads a float32
+// query in place and decodes any other, and a non-float32 block a row at a
+// time, into scratch of its own. A finite query far from a row can
+// overflow to an infinite score, which is an error.
+func (d Dense[T]) ScoreAll(query Embedding, metric Metric, dst []float32) error {
+	return d.score(query, metric, 0, len(d.norms), dst)
+}
+
+// score sets dst[i-lo] to the score of row i, for lo <= i < hi.
+func (d Dense[T]) score(query Embedding, metric Metric, lo, hi int, dst []float32) error {
+	dims := d.rows.Dims
+	if metric != L2 && metric != Cosine && metric != InnerProduct {
+		return fmt.Errorf("ivfq: Dense cannot score %v", metric)
 	}
+	if dims == 0 {
+		return errors.New("ivfq: zero Dense")
+	}
+	if len(dst) < hi-lo {
+		return fmt.Errorf("ivfq: %d scores for %d rows", len(dst), hi-lo)
+	}
+	q, err := denseQuery(query, dims)
+	if err != nil {
+		return err
+	}
+	dst = dst[:hi-lo]
+	if data, ok := any(d.rows.Data).([]float32); ok {
+		Dots(q, data[lo*dims:hi*dims], dst)
+	} else {
+		row := make([]float32, dims)
+		for i := range dst {
+			dst[i] = Dot(q, d.row(lo+i, row))
+		}
+	}
+	qq := float64(Dot(q, q))
+	switch metric {
+	case L2:
+		for i, dot := range dst {
+			dst[i] = -float32(qq + float64(d.norms[lo+i]) - 2*float64(dot))
+		}
+	case Cosine:
+		var row []float32
+		for i, dot := range dst {
+			rr := float64(d.norms[lo+i])
+			if qq >= tinyNorm2 && rr >= tinyNorm2 {
+				dst[i] = float32(float64(dot) / math.Sqrt(qq*rr))
+				continue
+			}
+			// Under tinyNorm2: sum this row in float64, so that only a
+			// true zero scores 0.
+			if row == nil {
+				row = make([]float32, dims)
+			}
+			dst[i] = cosine64(q, d.row(lo+i, row))
+		}
+	}
+	for i, s := range dst {
+		if math.IsNaN(float64(s)) || math.IsInf(float64(s), 0) {
+			return fmt.Errorf("ivfq: row %d scores %v", lo+i, s)
+		}
+	}
+	return nil
+}
+
+// tinyNorm2 is the squared norm under which cosine is summed in float64.
+// Above it, for both vectors, the float32 dot product's underflow error
+// (at most dims·2⁻¹⁴⁹) is negligible against ‖q‖‖row‖ ≥ 2⁻⁶⁰.
+const tinyNorm2 = 0x1p-60
+
+// cosine64 is the cosine of q and r summed in float64, 0 when either is
+// exactly zero.
+func cosine64(q, r []float32) float32 {
+	var dot, qq, rr float64
+	for j, x := range r {
+		dot += float64(q[j]) * float64(x)
+		qq += float64(q[j]) * float64(q[j])
+		rr += float64(x) * float64(x)
+	}
+	if qq == 0 || rr == 0 {
+		return 0
+	}
+	return float32(dot / (math.Sqrt(qq) * math.Sqrt(rr)))
+}
+
+// denseQuery returns query, which must be a dims-wide DenseEmbedding, as
+// float32 values: a read-only view for float32, decoded into a new buffer
+// otherwise.
+func denseQuery(query Embedding, dims int) ([]float32, error) {
+	// The type switch comes first: an unsupported query, a typed nil
+	// pointer included, is rejected before any of its methods runs. ivfq
+	// and rabitq each keep a switch like this one (a new vector.Scalar
+	// needs both); rabitq reads queries only through DenseEmbedding.Decode,
+	// the one cross-package seam. There is deliberately no registry.
+	switch e := query.(type) {
+	case DenseEmbedding[float32]:
+		if e.Dims() != dims {
+			return decodeQuery(e, dims) // its width error
+		}
+		// Read in place for the call, not copied: a tree scores one query
+		// against every node it visits.
+		return e.d.row(e.i, nil), nil
+	case DenseEmbedding[float16.Float16]:
+		return decodeQuery(e, dims)
+	case DenseEmbedding[int8]:
+		return decodeQuery(e, dims)
+	case DenseEmbedding[uint8]:
+		return decodeQuery(e, dims)
+	}
+	return nil, fmt.Errorf("ivfq: cannot score a %T query", query)
+}
+
+func decodeQuery[T vector.Scalar](e DenseEmbedding[T], dims int) ([]float32, error) {
+	if e.Dims() != dims {
+		return nil, fmt.Errorf("ivfq: %d-wide query for %d-wide rows", e.Dims(), dims)
+	}
+	q := make([]float32, dims)
+	return q, e.Decode(q)
 }

@@ -8,23 +8,6 @@ import (
 	"github.com/axiomhq/ivfq/vector"
 )
 
-// CentroidBlock is one tree node's centroid rows in an encoding the caller
-// chose, held in the order its encoder received them. Len and Dims are its
-// row count and width.
-//
-// ScoreAll sets scores[i], for every i < Len(), to the negated squared L2
-// distance between query and row i, or an estimate of it: higher is
-// nearer. A tree compares scores from different blocks, so every block of
-// one tree must score that same quantity on the same scale. query is Dims()
-// wide and scores has at least Len() entries; ScoreAll must not modify
-// query, retain either slice, or write past scores[Len()-1]. A tree calls
-// ScoreAll from concurrent searches, so a block must not change once built.
-type CentroidBlock interface {
-	Len() int
-	Dims() int
-	ScoreAll(query, scores []float32)
-}
-
 // Encoder encodes rows of S into a block B: DenseEncoder[S, T] makes
 // Dense[T] blocks, rabitq.BlockEncoder[S] rabitq.Blocks, from any source
 // scalar S. Encode borrows rows read-only for the call and returns a block
@@ -34,26 +17,28 @@ type CentroidBlock interface {
 // BuildTree does not take an Encoder: a tree's internal rows are fractional
 // means held as [][]float32, so its encoder is NewDense[T] or a closure
 // over rabitq.NewBlock.
-type Encoder[S vector.Scalar, B CentroidBlock] interface {
+type Encoder[S vector.Scalar, B EmbeddingBatch] interface {
 	Encode(rows vector.Slice[S]) (B, error)
 }
 
 // Tree is FloatTree's hierarchy with every node's rows (child means for an
 // internal node, leaf centroids for a leaf holder) held as one encoded
 // block B: Tree[Dense[float32]], Tree[Dense[float16.Float16]],
-// Tree[Dense[int8]], Tree[Dense[uint8]] or Tree[rabitq.Block]. The tree
-// keeps the topology and, per row, the child node or original leaf id; the
-// blocks keep everything else. There is no float32 copy beside the blocks,
-// so a lossy B cannot return a leaf's original centroid; a caller that
-// needs them keeps its own.
+// Tree[Dense[int8]], Tree[Dense[uint8]] or Tree[rabitq.Block]. A search
+// scores each node's rows with B.ScoreAll under L2, whatever metric the
+// field uses, and compares scores across blocks, so every block of one
+// tree must score L2 on one scale. The tree keeps the topology and, per
+// row, the child node or original leaf id; the blocks keep everything else.
+// There is no float32 copy beside the blocks, so a lossy B cannot return a
+// leaf's original centroid; a caller that needs them keeps its own.
 //
 // A Tree is immutable and safe for concurrent searches.
-type Tree[B CentroidBlock] struct {
+type Tree[B EmbeddingBatch] struct {
 	dims, leaves int
 	nodes        []blockNode[B] // nodes[0] is the root
 }
 
-type blockNode[B CentroidBlock] struct {
+type blockNode[B EmbeddingBatch] struct {
 	block    B
 	children []int // node id per row of an internal node
 	leaves   []int // leaf id per row of a leaf holder
@@ -67,7 +52,7 @@ type blockNode[B CentroidBlock] struct {
 // rules and must be at least one-dimensional. An encoder error, or a block
 // whose Len or Dims disagrees with its rows, fails the build; so does a ctx
 // cancelled at any point before BuildTree returns, even over no centroids.
-func BuildTree[B CentroidBlock](ctx context.Context, centroids [][]float32, fanout int, encode func(rows [][]float32) (B, error)) (Tree[B], error) {
+func BuildTree[B EmbeddingBatch](ctx context.Context, centroids [][]float32, fanout int, encode func(rows [][]float32) (B, error)) (Tree[B], error) {
 	if len(centroids) > 0 && len(centroids[0]) == 0 {
 		return Tree[B]{}, errors.New("ivfq: centroids are zero-dimensional")
 	}
@@ -106,23 +91,25 @@ func BuildTree[B CentroidBlock](ctx context.Context, centroids [][]float32, fano
 }
 
 // Nearest returns up to probe leaf ids, nearest first, ties by lower id. It
-// keeps the beam best nodes per level by their blocks' scores and ranks
+// keeps the beam best nodes per level by their blocks' L2 scores and ranks
 // every leaf of the holders it reaches, as FloatTree.EvaluationsBeam does;
-// with B = Dense[float32] the result is EvaluationsBeam's. A q of the wrong
-// width, or a beam or probe below one, returns nil. q must be finite.
-func (t Tree[B]) Nearest(q []float32, beam, probe int) []int {
-	if len(t.nodes) == 0 || beam <= 0 || probe <= 0 || len(q) != t.dims {
-		return nil
+// with B = Dense[float32] and no score overflowing, the result is
+// EvaluationsBeam's. An empty tree, or a beam or probe below one, returns
+// nil, nil without looking at q. Otherwise the first error a block's
+// ScoreAll returns (a q of the wrong width or representation, an infinite
+// score) is Nearest's, with no ids.
+func (t Tree[B]) Nearest(q Embedding, beam, probe int) ([]int, error) {
+	if len(t.nodes) == 0 || beam <= 0 || probe <= 0 {
+		return nil, nil
 	}
 	var scores []float32
-	score := func(b B) []float32 {
+	score := func(b B) ([]float32, error) {
 		if n := b.Len(); cap(scores) < n {
 			scores = make([]float32, n)
 		} else {
 			scores = scores[:n]
 		}
-		b.ScoreAll(q, scores)
-		return scores
+		return scores, b.ScoreAll(q, L2, scores)
 	}
 	active, holders := []int{0}, []int(nil)
 	var best, cands []rankedNode
@@ -134,7 +121,11 @@ func (t Tree[B]) Nearest(q []float32, beam, probe int) []int {
 				holders = append(holders, id)
 				continue
 			}
-			for j, s := range score(n.block) {
+			s, err := score(n.block)
+			if err != nil {
+				return nil, err
+			}
+			for j, s := range s {
 				best = insertNearest(best, rankedNode{n.children[j], -s}, beam)
 			}
 		}
@@ -145,11 +136,15 @@ func (t Tree[B]) Nearest(q []float32, beam, probe int) []int {
 	}
 	for _, id := range holders {
 		n := &t.nodes[id]
-		for j, s := range score(n.block) {
+		s, err := score(n.block)
+		if err != nil {
+			return nil, err
+		}
+		for j, s := range s {
 			cands = append(cands, rankedNode{n.leaves[j], -s})
 		}
 	}
-	return idsOf(selectNearest(nil, cands, probe))
+	return idsOf(selectNearest(nil, cands, probe)), nil
 }
 
 // Dims is the width of every centroid in the tree.
