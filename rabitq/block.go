@@ -22,8 +22,7 @@ type Block struct {
 }
 
 // NewBlock encodes rows, which must be finite, for squared-L2 routing in
-// rot's frame. With rot
-// fixed it is BuildTree's encoder:
+// rot's frame. With rot fixed it is BuildTree's encoder:
 //
 //	func(rows [][]float32) (rabitq.Block, error) { return rabitq.NewBlock(rows, rot) }
 func NewBlock(rows [][]float32, rot *Rotation) (Block, error) {

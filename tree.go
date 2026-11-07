@@ -270,7 +270,7 @@ func (s *Searcher) Assign(q []float32, beam int) int {
 
 // TwoStageAssign ranks one leaf in two exact stages: a distance for every
 // child of the root, then a distance for every leaf under the top
-// subtrees. It is TwoStageNearest(q, top)[0], or -1.
+// subtrees, then returns the nearest such leaf, or -1.
 //
 // On large trees the stage-two scan is the whole cost and Assign's beam
 // pruning wins. Small trees are where this wins: with a narrow root fan a
@@ -362,19 +362,6 @@ func (t FloatTree) nearestInto(w *treeWorkspace, q []float32, beam, count int) (
 	}
 	w.best = selectNearest(w.best[:0], w.next, count)
 	return w.best, evals
-}
-
-// TwoStageNearest is TwoStageAssign's search with the picked leaf ids,
-// nearest first, and the number of centroid distance evaluations returned —
-// the pairing EvaluationsBeam gives the beam search.
-func (t FloatTree) TwoStageNearest(q []float32, top int) ([]int, int) {
-	if len(t.nodes) == 0 || top <= 0 || len(q) != t.dims {
-		return nil, 0
-	}
-	var w treeWorkspace
-	w.next = make([]rankedNode, 0, min(t.fanout, len(t.nodes)))
-	best, evals := t.twoStageInto(&w, q, top, top)
-	return idsOf(best), evals
 }
 
 // twoStageInto runs the two-stage search into w: stage one ranks the root's

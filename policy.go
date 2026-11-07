@@ -194,7 +194,8 @@ type ClusterStat struct {
 	Hits      int
 }
 
-// DefaultPolicy is the one shipped Policy. SplitTarget answers with one hood, chosen by size and then by radius.
+// DefaultPolicy is the one shipped Policy. SplitTarget answers with one
+// hood, chosen by size and then by radius.
 type DefaultPolicy struct{}
 
 var _ Policy = DefaultPolicy{}

@@ -210,46 +210,6 @@ func (t *FloatTree) ApplyCentroidDeltas(deltas [][]CentroidUpsert) error {
 	return nil
 }
 
-// UpsertAll turns t into centroids' tree without a Build: t itself when
-// they already agree, and otherwise a clone with the changed and appended
-// slots upserted — what ApplyCentroidDeltas does with a delta. A split
-// changes one slot and appends one, and rebuilding a ~10k-centroid tree for
-// that costs far more than two upserts. A shorter set cuts the tree to
-// its length first (Truncate). At most limit slots are upserted (callers
-// pass max(2, t.Leaves()/16), the CentroidDelta bound); past it ok is
-// false and the caller builds.
-func (t *FloatTree) UpsertAll(centroids [][]float32, limit int) (*FloatTree, bool) {
-	leaves := t.Leaves()
-	if len(centroids) == 0 {
-		return nil, false
-	}
-	var changed []int
-	for i := range centroids {
-		if i < leaves && slices.Equal(t.Leaf(i), centroids[i]) {
-			continue
-		}
-		if len(changed) == limit {
-			return nil, false
-		}
-		changed = append(changed, i)
-	}
-	if len(changed) == 0 && len(centroids) == leaves {
-		return t, true
-	}
-	c := t.Clone()
-	if len(centroids) < leaves {
-		if err := c.Truncate(len(centroids)); err != nil {
-			return nil, false
-		}
-	}
-	for _, i := range changed {
-		if err := c.Upsert(i, centroids[i]); err != nil {
-			return nil, false
-		}
-	}
-	return &c, true
-}
-
 // Centroid is the mean of the dims-wide vectors (spherical: normalized) and
 // their mean distance to it; nil for none. Vectors of another width are
 // skipped.

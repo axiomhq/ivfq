@@ -197,20 +197,31 @@ func treeAssigner(tree *FloatTree, centroids [][]float32) func([]float32) int {
 	}
 }
 
-// TestUpsertAllAfterSplit: a split's tree is the old tree with the two
-// changed slots upserted, not a rebuild, and it routes like a fresh Build
-// of the split set.
-func TestUpsertAllAfterSplit(t *testing.T) {
+// TestApplyCentroidDeltasAfterSplit: a split applied as a delta to a clone
+// of the old tree, not a rebuild, routes like a fresh Build of the split
+// set and leaves the old tree as it was. It checks routing only: a split's
+// halves sit near the old slot, so a replaced leaf left in the wrong
+// holder still routes right here. TestCentroidDeltaDropsBySwap's one-probe
+// check is what catches that.
+func TestApplyCentroidDeltasAfterSplit(t *testing.T) {
 	const k, dims = 2000, 16
 	published, split := splitSet(k, dims)
 	tree, err := Build(context.Background(), published, splitTestFanout)
 	if err != nil {
 		t.Fatal(err)
 	}
-	limit := max(2, tree.Leaves()/16)
-	up, ok := tree.UpsertAll(split, limit)
-	if !ok || up == &tree || up.Leaves() != k+1 {
-		t.Fatalf("UpsertAll: ok %v, %d leaves", ok, up.Leaves())
+	d, ok := CentroidDelta(published, split, max(2, tree.Leaves()/16))
+	if !ok {
+		t.Fatal("split is not a delta")
+	}
+	up := tree.Clone()
+	if err := up.ApplyCentroidDeltas([][]CentroidUpsert{d}); err != nil || up.Leaves() != k+1 {
+		t.Fatalf("ApplyCentroidDeltas: %v, %d leaves", err, up.Leaves())
+	}
+	for i := range split {
+		if !slices.Equal(up.Leaf(i), split[i]) {
+			t.Fatalf("leaf %d is not the split's", i)
+		}
 	}
 	if tree.Leaves() != k || !slices.Equal(tree.Leaf(5), published[5]) {
 		t.Fatal("the original tree was modified")
@@ -219,7 +230,7 @@ func TestUpsertAllAfterSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	upA, freshA := treeAssigner(up, split), treeAssigner(&fresh, split)
+	upA, freshA := treeAssigner(&up, split), treeAssigner(&fresh, split)
 	rng := rand.New(rand.NewSource(10))
 	differ := 0
 	for n := range 5000 {
@@ -238,37 +249,14 @@ func TestUpsertAllAfterSplit(t *testing.T) {
 	if differ != 0 {
 		t.Fatalf("%d of 5000 rows routed differently from a fresh Build", differ)
 	}
-	// The same split as a delta over the original tree lands on the same leaves.
-	d, ok := CentroidDelta(published, split, limit)
-	if !ok {
-		t.Fatal("split is not a delta")
-	}
-	applied := tree.Clone()
-	if err := applied.ApplyCentroidDeltas([][]CentroidUpsert{d}); err != nil {
-		t.Fatal(err)
-	}
-	for i := range split {
-		if !slices.Equal(applied.Leaf(i), up.Leaf(i)) {
-			t.Fatalf("leaf %d differs between ApplyCentroidDeltas and UpsertAll", i)
-		}
-	}
-	if err := applied.ApplyCentroidDeltas([][]CentroidUpsert{{{ID: k + 5, Vec: split[0]}}}); !errors.Is(err, ErrCorrupt) {
+	if err := up.ApplyCentroidDeltas([][]CentroidUpsert{{{ID: k + 5, Vec: split[0]}}}); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("gap into a tree: %v, want ErrCorrupt", err)
-	}
-	// A shorter set cuts the tree: the leaves are the set's.
-	cut, ok := tree.UpsertAll(published[:k-1], limit)
-	if !ok || cut.Leaves() != k-1 || tree.Leaves() != k {
-		t.Fatalf("UpsertAll of a set one shorter: ok %v, %d leaves, original %d", ok, cut.Leaves(), tree.Leaves())
-	}
-	// Unchanged: the tree itself.
-	if same, ok := tree.UpsertAll(published, limit); !ok || same != &tree {
-		t.Fatal("an unchanged set did not reuse the tree")
 	}
 }
 
-// BenchmarkSplitUpsertAll is the per-split cost of the tree at 10,150
-// clusters: a full Build against clone + two upserts.
-func BenchmarkSplitUpsertAll(b *testing.B) {
+// BenchmarkSplitDelta is the per-split cost of the tree at 10,150
+// clusters: a full Build against clone + the split's delta.
+func BenchmarkSplitDelta(b *testing.B) {
 	const k, dims = 10_150, 128
 	published, split := splitSet(k, dims)
 	tree, err := Build(context.Background(), published, splitTestFanout)
@@ -282,10 +270,15 @@ func BenchmarkSplitUpsertAll(b *testing.B) {
 			}
 		}
 	})
-	b.Run("upsert", func(b *testing.B) {
+	d, ok := CentroidDelta(published, split, max(2, k/16))
+	if !ok {
+		b.Fatal("split is not a delta")
+	}
+	b.Run("delta", func(b *testing.B) {
 		for b.Loop() {
-			if _, ok := tree.UpsertAll(split, max(2, k/16)); !ok {
-				b.Fatal("not upserted")
+			c := tree.Clone()
+			if err := c.ApplyCentroidDeltas([][]CentroidUpsert{d}); err != nil {
+				b.Fatal(err)
 			}
 		}
 	})

@@ -257,8 +257,9 @@ func TestTreeTwoStage(t *testing.T) {
 			if got := s.TwoStageAssign(q, fan); got != want {
 				t.Fatalf("top=%d: row %d: two-stage %d, flat %d", fan, i, got, want)
 			}
-			ids, evals := tree.TwoStageNearest(q, fan)
-			if len(ids) == 0 || ids[0] != want {
+			var w treeWorkspace
+			best, evals := tree.twoStageInto(&w, q, fan, fan)
+			if ids := idsOf(best); len(ids) == 0 || ids[0] != want {
 				t.Fatalf("top=%d: row %d: nearest %v, flat %d", fan, i, ids, want)
 			}
 			// top = fan opens every subtree: stage one ranks each root
@@ -268,7 +269,7 @@ func TestTreeTwoStage(t *testing.T) {
 			}
 			// top = 2 opens exactly the two subtrees whose centroids stage
 			// one ranked best.
-			if _, evals := tree.TwoStageNearest(q, 2); evals != fan+twoBucketSize(t, &tree, q) {
+			if _, evals := tree.twoStageInto(&w, q, 2, 2); evals != fan+twoBucketSize(t, &tree, q) {
 				t.Fatalf("top=2: row %d: evals %d, want %d", i, evals, fan+twoBucketSize(t, &tree, q))
 			}
 		}
@@ -947,5 +948,34 @@ func BenchmarkTreeI8(b *testing.B) {
 			}
 			b.ReportMetric(float64(e)/float64(i), "f32evals/op")
 		})
+	}
+}
+
+// EvaluationsBeamI8Work names EvaluationsBeam's leaves, counts no more
+// float32 distances, and counts every int8 distance of the leaves it scanned.
+func TestEvaluationsBeamI8Work(t *testing.T) {
+	v := treeData(3000, 256)
+	tree := mustBuild(v, 100)
+	tree.QuantizeI8()
+	for _, q := range treeData(8, 256) {
+		ids, work := tree.EvaluationsBeamI8Work(q, 16, 96)
+		want, all := tree.EvaluationsBeam(q, 16, 96)
+		if !slices.Equal(ids, want) || work.Float32 > all || work.Quantized == 0 {
+			t.Fatalf("work %+v, EvaluationsBeam %d", work, all)
+		}
+		// Every leaf the float32 search scanned was scored in int8.
+		w := workspaces.Get().(*treeWorkspace)
+		internal := tree.beamHolders(w, q, Dot(q, q), 16)
+		workspaces.Put(w)
+		if work.Quantized != all-internal {
+			t.Fatalf("quantized %d, want %d leaves", work.Quantized, all-internal)
+		}
+	}
+	plain := mustBuild(v, 100)
+	for _, q := range treeData(4, 256) {
+		_, e := plain.EvaluationsBeam(q, 16, 96)
+		if _, work := plain.EvaluationsBeamI8Work(q, 16, 96); work.Quantized != 0 || work.Float32 != e {
+			t.Fatalf("unquantized: %+v, want float32 %d", work, e)
+		}
 	}
 }
