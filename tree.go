@@ -564,8 +564,10 @@ func (t FloatTree) MarshalBinary() ([]byte, error) {
 // maxTreeDepth bounds the depth UnmarshalTree accepts. index keeps every
 // internal node's descendant holders, so a chain of d nodes costs O(d²)
 // memory: an unbounded chain turns a small blob into gigabytes. Build's
-// depth is about log(leaves), far below this.
-const maxTreeDepth = 128
+// depth is about log(leaves) but k-means at fanout 2 can peel one outlier
+// per level on geometrically spread centroids (height ~145 measured at
+// 205 leaves), so the cap leaves wide headroom: a 1024-chain costs ~4 MB.
+const maxTreeDepth = 1024
 
 // UnmarshalTree decodes MarshalBinary output. Counts are checked against the
 // bytes remaining before they size an allocation, and indices against the
