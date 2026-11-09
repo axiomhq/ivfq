@@ -90,7 +90,15 @@ func (s Slice[T]) Row(i int, dst []float32) []float32 {
 	case []float16.Float16:
 		dst = dst[:s.Dims]
 		for j, h := range d[lo:hi] {
-			dst[j] = h.Float32()
+			// Normal halves are a shift and a rebias; zero, subnormal, Inf
+			// and NaN go through the library. Inline: a helper call costs more
+			// than it saves here.
+			u := uint32(h)
+			if e := u >> 10 & 31; e != 0 && e != 31 {
+				dst[j] = math.Float32frombits(u&0x8000<<16 | (e+112)<<23 | u&0x3ff<<13)
+			} else {
+				dst[j] = h.Float32()
+			}
 		}
 		return dst
 	case []int8:

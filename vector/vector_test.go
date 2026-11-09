@@ -493,3 +493,18 @@ func near(t *testing.T, what string, got []float32, want []float64) {
 		}
 	}
 }
+
+// Row's inlined float16 decode must match the library on every bit
+// pattern, including zeros, subnormals, Inf and NaN.
+func TestRowDecodesEveryHalf(t *testing.T) {
+	all := make([]float16.Float16, 1<<16)
+	for i := range all {
+		all[i] = float16.Frombits(uint16(i))
+	}
+	got := vector.Slice[float16.Float16]{Dims: len(all), Data: all}.Row(0, make([]float32, len(all)))
+	for i, h := range all {
+		if want := h.Float32(); math.Float32bits(got[i]) != math.Float32bits(want) {
+			t.Fatalf("half %#04x: got %#08x, want %#08x", i, math.Float32bits(got[i]), math.Float32bits(want))
+		}
+	}
+}
