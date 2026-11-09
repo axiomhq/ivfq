@@ -561,6 +561,12 @@ func (t FloatTree) MarshalBinary() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// maxTreeDepth bounds the depth UnmarshalTree accepts. index keeps every
+// internal node's descendant holders, so a chain of d nodes costs O(d²)
+// memory: an unbounded chain turns a small blob into gigabytes. Build's
+// depth is about log(leaves), far below this.
+const maxTreeDepth = 128
+
 // UnmarshalTree decodes MarshalBinary output. Counts are checked against the
 // bytes remaining before they size an allocation, and indices against the
 // encoder's invariants: in range, the root is node zero, every child
@@ -611,6 +617,7 @@ func UnmarshalTree(data []byte) (FloatTree, error) {
 		t.leaves[i] = v
 	}
 	parented, owned := make([]bool, nNodes), make([]bool, nLeaves)
+	depth := make([]int, nNodes)           // root is 0; children are numbered after parents
 	unowned, unparented := nLeaves, nNodes // only the root may stay unparented
 	for i := range t.nodes {
 		v, e := readVec()
@@ -637,9 +644,10 @@ func UnmarshalTree(data []byte) (FloatTree, error) {
 			if binary.Read(r, binary.LittleEndian, &x) != nil {
 				return FloatTree{}, errors.New("ivfq: truncated tree")
 			}
-			if uint64(x) >= nNodes || int(x) <= i || parented[x] {
+			if uint64(x) >= nNodes || int(x) <= i || parented[x] || depth[i] >= maxTreeDepth {
 				return FloatTree{}, corrupt
 			}
+			depth[x] = depth[i] + 1
 			parented[x] = true
 			unparented--
 			t.nodes[i].children[j] = int(x)

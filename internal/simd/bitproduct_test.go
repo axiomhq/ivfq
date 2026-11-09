@@ -25,6 +25,7 @@ func TestBitProductMatchesGeneric(t *testing.T) {
 						s[i] = ^uint64(0)
 					case 2:
 						s[i] = rng.Uint64() & rng.Uint64() & rng.Uint64()
+					case 3: // all zero: s starts zeroed
 					}
 				}
 			}

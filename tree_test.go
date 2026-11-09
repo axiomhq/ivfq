@@ -979,3 +979,29 @@ func TestEvaluationsBeamI8Work(t *testing.T) {
 		}
 	}
 }
+
+// A chain of internal nodes makes index keep O(depth²) descendant lists, so a
+// small blob must not be able to ask for an arbitrarily deep one.
+func TestUnmarshalTreeRejectsDeepChain(t *testing.T) {
+	const links = 4 * maxTreeDepth
+	b := []byte("DVT\x01")
+	for _, x := range []uint32{1, 2, 1, links + 1, 0, 2*links + 1} {
+		b = binary.LittleEndian.AppendUint32(b, x)
+	}
+	node := func(children ...uint32) {
+		b = binary.LittleEndian.AppendUint32(b, 0) // 1-dim centroid
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(children)))
+		b = binary.LittleEndian.AppendUint32(b, 0)
+		for _, c := range children {
+			b = binary.LittleEndian.AppendUint32(b, c)
+		}
+	}
+	for i := uint32(0); i < links; i++ {
+		node(2*i+1, 2*i+2) // internal: an empty holder and the next link
+		node()
+	}
+	node()
+	if _, err := UnmarshalTree(b); err == nil {
+		t.Fatal("decoded a chain deeper than maxTreeDepth")
+	}
+}

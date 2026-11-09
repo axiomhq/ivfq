@@ -388,10 +388,7 @@ func workRow(v []float32, unit bool) []float32 {
 	if n == 0 {
 		return nil
 	}
-	inv := float32(1 / math.Sqrt(n))
-	for j := range row {
-		row[j] *= inv
-	}
+	scaleBy(row, 1/math.Sqrt(n))
 	return row
 }
 
@@ -720,7 +717,13 @@ func (c *Quantizer) bindGlobal(s *bitScorer, q Query) {
 	}
 	g := q.global
 	f := b.fast
-	n2 := g.qq + f.rcc - 2*float64(ivfq.Dot(q.rotated, f.rc))
+	// float64 dot: for a tight cluster far from the origin qq and rcc are huge
+	// and a float32 dot loses the difference.
+	var qrc float64
+	for i, x := range q.rotated {
+		qrc += float64(x) * float64(f.rc[i])
+	}
+	n2 := g.qq + f.rcc - 2*qrc
 	s.qNorm = math.Sqrt(max(0, n2))
 	if s.qNorm == 0 {
 		return
@@ -782,10 +785,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	} else {
 		copy(resid, q.Vector[:d])
 		if b.Unit {
-			inv := float32(q.invNorm)
-			for j := range resid {
-				resid[j] *= inv
-			}
+			scaleBy(resid, q.invNorm)
 		}
 		for j := range resid {
 			resid[j] -= b.centroid(j)
@@ -1287,4 +1287,19 @@ func (b *Code) retained() int {
 		centroid = 0
 	}
 	return n + 8*len(b.Words) + 4*(centroid+len(b.Norms)+len(b.Aligns)) + 32
+}
+
+// scaleBy multiplies v by inv. A norm below ~3e-39 has a reciprocal that
+// overflows float32, so that case scales in float64; otherwise the float32
+// product keeps the encoded bytes unchanged.
+func scaleBy(v []float32, inv float64) {
+	if f := float32(inv); !math.IsInf(float64(f), 0) {
+		for j := range v {
+			v[j] *= f
+		}
+		return
+	}
+	for j := range v {
+		v[j] = float32(float64(v[j]) * inv)
+	}
 }

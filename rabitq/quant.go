@@ -49,6 +49,9 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 		if len(v) != dims {
 			return Quantizer{}, fmt.Errorf("rabitq: row %d is %d-wide, the field is %d", i, len(v), dims)
 		}
+		if err := checkFinite(i, v); err != nil {
+			return Quantizer{}, err
+		}
 	}
 	unit := opts.Metric == ivfq.Cosine
 	work := vectors
@@ -184,6 +187,9 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 	for i, v := range vectors {
 		if len(v) != dims {
 			return Quantizer{}, fmt.Errorf("rabitq: appended row %d is %d-wide, the column is %d", i, len(v), dims)
+		}
+		if err := checkFinite(i, v); err != nil {
+			return Quantizer{}, err
 		}
 		row := workRow(v, b.Unit)
 		if row == nil {
@@ -369,10 +375,7 @@ func (q Query) Rotated(rot *Rotation) Query {
 	v := make([]float32, rot.dims)
 	copy(v, q.Vector[:rot.dims])
 	if q.Metric == ivfq.Cosine && q.invNorm != 0 {
-		inv := float32(q.invNorm)
-		for j := range v {
-			v[j] *= inv
-		}
+		scaleBy(v, q.invNorm)
 	}
 	rot.Apply(v)
 	q.rotated = v

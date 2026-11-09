@@ -87,3 +87,7 @@ func TestApplyBlockMatchesApply(t *testing.T) {
 		}
 	}
 }
+
+func TestRotationZeroWidth(t *testing.T) {
+	NewRotation(7, 0).Apply(nil) // must not panic
+}

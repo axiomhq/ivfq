@@ -274,3 +274,38 @@ func ExampleScorer_RefineBounds() {
 	fmt.Println(top.Hits()[0].ID)
 	// Output: 1
 }
+
+// Norms below ~3e-39 have a reciprocal that overflows float32; scaling in
+// float64 keeps the column and its encoding finite.
+func TestTinyCosineRowStaysFinite(t *testing.T) {
+	rot := NewRotation(3, 4)
+	col, err := Quantize([][]float32{{1e-39, 0, 0, 0}, {1, 2, 3, 4}}, Options{Metric: ivfq.Cosine, Rotation: rot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := col.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalBinary(b); err != nil {
+		t.Fatalf("saved column does not load: %v", err)
+	}
+}
+
+// Quantize must refuse what UnmarshalBinary refuses, so a saved column loads.
+func TestQuantizeRejectsNonFinite(t *testing.T) {
+	rot := NewRotation(3, 4)
+	for _, x := range []float32{float32(math.NaN()), float32(math.Inf(1))} {
+		rows := [][]float32{{1, 2, 3, 4}, {x, 0, 0, 0}}
+		if _, err := Quantize(rows, Options{Metric: ivfq.L2, Rotation: rot}); err == nil {
+			t.Fatalf("Quantize accepted %v", x)
+		}
+		col, err := Quantize(rows[:1], Options{Metric: ivfq.L2, Rotation: rot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := AppendRows(col, rot, rows[1:]); err == nil {
+			t.Fatalf("AppendRows accepted %v", x)
+		}
+	}
+}
