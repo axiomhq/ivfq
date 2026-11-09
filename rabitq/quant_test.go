@@ -309,3 +309,30 @@ func TestQuantizeRejectsNonFinite(t *testing.T) {
 		}
 	}
 }
+
+// FuzzUnmarshalBinary: arbitrary bytes must decode or fail without
+// panicking, and a decoded column must re-encode to bytes that decode.
+func FuzzUnmarshalBinary(f *testing.F) {
+	col, err := Quantize([][]float32{{1, 2, 3, 4}, {4, 3, 2, 1}, {0, 1, 0, 1}}, Options{Metric: ivfq.L2, Rotation: NewRotation(3, 4)})
+	if err != nil {
+		f.Fatal(err)
+	}
+	b, _ := col.MarshalBinary()
+	f.Add(b)
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		for _, decode := range []func([]byte) (Quantizer, error){UnmarshalBinary, UnmarshalBinaryBorrowed} {
+			q, err := decode(data)
+			if err != nil {
+				continue
+			}
+			out, err := q.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := UnmarshalBinary(out); err != nil {
+				t.Fatalf("re-encoded column does not decode: %v", err)
+			}
+		}
+	})
+}

@@ -16,3 +16,5 @@ jobs:
       # -short skips the slow kmeans fits (~5 min under -race).
       - run: go test -race -short ./...
       - run: go test -run '^$' -fuzz FuzzDecodeCentroids -fuzztime 20s .
+      - run: go test -run '^$' -fuzz FuzzUnmarshalTree -fuzztime 20s .
+      - run: go test -run '^$' -fuzz FuzzUnmarshalBinary -fuzztime 20s ./rabitq

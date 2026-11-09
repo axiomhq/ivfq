@@ -1005,3 +1005,24 @@ func TestUnmarshalTreeRejectsDeepChain(t *testing.T) {
 		t.Fatal("decoded a chain deeper than maxTreeDepth")
 	}
 }
+
+// FuzzUnmarshalTree: arbitrary bytes must decode or fail without panicking,
+// and what decodes must search and re-encode to a tree that decodes again.
+func FuzzUnmarshalTree(f *testing.F) {
+	f.Add(mustBytes(mustBuild([][]float32{{0, 0}, {1, 0}, {0, 1}, {1, 1}, {2, 2}}, 2)))
+	f.Add([]byte("DVT\x01"))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		tree, err := UnmarshalTree(data)
+		if err != nil {
+			return
+		}
+		tree.Nearest(make([]float32, tree.Dims()), 2)
+		b, err := tree.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := UnmarshalTree(b); err != nil {
+			t.Fatalf("re-encoded tree does not decode: %v", err)
+		}
+	})
+}
