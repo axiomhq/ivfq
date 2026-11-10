@@ -36,3 +36,14 @@ func TestScorePanicsOnUnknownMetric(t *testing.T) {
 	}()
 	Score(Metric(9), []float32{1}, []float32{1})
 }
+
+// Score ranks higher-is-better: closer under L2, larger under the others.
+func TestScoreDirection(t *testing.T) {
+	q, near, far := []float32{1, 0}, []float32{1, 1}, []float32{5, 5}
+	if Score(L2, q, q) != 0 || Score(L2, q, far) >= Score(L2, q, near) {
+		t.Fatal("L2 score must be 0 at the query and fall with distance")
+	}
+	if Score(InnerProduct, q, far) != Dot(q, far) || Score(Cosine, q, near) != CosineSim(q, near) {
+		t.Fatal("InnerProduct and Cosine scores must be Dot and CosineSim")
+	}
+}

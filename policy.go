@@ -28,7 +28,7 @@ const (
 	HoodTarget = 196
 
 	// MaxHoodRows is the hard ceiling on live rows in a published dense
-	// hood (DefaultPolicy.MaxHoodRows); dotwerk's capacity pass enforces it
+	// hood (DefaultPolicy.MaxHoodRows); the caller's capacity pass enforces it
 	// beyond the geometric splits.
 	MaxHoodRows = 256
 
@@ -85,7 +85,7 @@ const (
 
 // DefaultNprobe is how many hoods a query probes when the caller does not
 // name a number and no recall controller has tuned the index. It is also
-// where package recall's controller starts and what its ceiling is a
+// where a recall controller starts and what its ceiling is a
 // multiple of, so it is a starting point rather than the last word. Two
 // bounds, and the smaller wins:
 //

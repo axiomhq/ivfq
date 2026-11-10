@@ -5,7 +5,7 @@ go get github.com/axiomhq/ivfq
 ```
 
 Inverted-file clustering plus 1-bit quantization for approximate nearest
-neighbour search, in pure Go with AVX2 kernels. The FAISS "IVF + quantizer"
+neighbour search, in Go with AVX2 assembly kernels and pure-Go fallbacks. The FAISS "IVF + quantizer"
 pair, without the storage: you keep the rows, this package gives you the
 clusters, the codes and the scan.
 

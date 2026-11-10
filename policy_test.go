@@ -327,3 +327,12 @@ func TestMergeTargetsPlansDisjointPairs(t *testing.T) {
 		}
 	}
 }
+
+// HoodK rounds up: an exact multiple of HoodTarget needs no extra cluster.
+func TestHoodKRoundsUp(t *testing.T) {
+	for _, tc := range []struct{ total, k int }{{HoodTarget * 1000, 1000}, {HoodTarget*1000 + 1, 1001}} {
+		if got := HoodK(tc.total); got != tc.k {
+			t.Fatalf("HoodK(%d) = %d, want %d", tc.total, got, tc.k)
+		}
+	}
+}

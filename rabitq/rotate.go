@@ -103,10 +103,10 @@ func NewRotation(seed uint64, dims int) *Rotation {
 
 // Apply rotates v in place. v must be r.dims long.
 func (r *Rotation) Apply(v []float32) {
-	_ = v[r.dims-1]
 	if r.dims <= 1 {
 		return
 	}
+	_ = v[r.dims-1]
 	sp := r.scratch(r.dims)
 	src, dst := v[:r.dims], (*sp)[:r.dims]
 	for round := range r.perm {
