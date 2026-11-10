@@ -1,7 +1,6 @@
 // Package kmeans fits centroids for an IVF index: sampled greedy k-means++
-// with one parallel assignment pass, two-level above TwoLevelK, E-means as
-// the faster flat fit to choose instead, and the size-floored 2-means a
-// cluster split uses.
+// with one parallel assignment pass, two-level above TwoLevelK, and the
+// size-floored 2-means a cluster split uses.
 package kmeans
 
 import (
@@ -56,8 +55,7 @@ type Config struct {
 	// MaxBytes sample with fewer rows than K lowers it to that row count,
 	// so size by the result's length, not K.
 	K int
-	// Iters is how many Lloyd iterations follow the k-means++ seeding, or
-	// for FitEMeans how many passes it makes over the training sample.
+	// Iters is how many Lloyd iterations follow the k-means++ seeding.
 	Iters int
 	// Seed fixes the training sample, the seeding draw and every reseed,
 	// so one Config over one input gives one answer.

@@ -12,7 +12,7 @@ clusters, the codes and the scan.
 | package | what it holds |
 | --- | --- |
 | `ivfq` | sizing rule (`HoodK`, `DefaultNprobe`), `Policy`, split and merge rules, the centroid trees (`FloatTree`; `Tree[B]` over any `EmbeddingBatch`, such as `Dense[T]`), the centroid codec, and the distance vocabulary (`Metric`, `Embedding`, `EmbeddingBatch`, `Score`, `Dot`, `L2Sq`, `CosineSim`) |
-| `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids; `Config.FitEMeans`: the same fit trained by E-means; `Config.FitBalanced` for splits |
+| `kmeans` | `Config.Fit`: sampled greedy k-means++ with one parallel assignment pass, two-level above `kmeans.TwoLevelK` centroids; `Config.FitBalanced` for splits |
 | `rabitq` | 1-bit RaBitQ codes, one bit per dimension plus two float32 per row: `Quantize`, `Quantizer`, `Scorer`, `Rotation`, and `Block` for `ivfq.Tree` |
 | `rank` | top-k selection |
 | `codec` | f16 and int8 row storage |
@@ -38,14 +38,6 @@ centroids, then k fine ones under them, and each row searches only its
 16 nearest coarse centroids' fine ones: about 17·√k distances per row,
 not k. To route rows later, `s := tree.NewSearcher()` then
 `s.Assign(row, beam)`, one `Searcher` per goroutine.
-
-`kmeans.Config{K: k, Iters: kmeans.EMeansIters, Seed: 1}.FitEMeans(ctx, vectors)`
-is the same fit trained by E-means (mini-batch updates from a random start,
-after Faiss `contrib/e_means`) instead of k-means++ and Lloyd's. At or below
-`kmeans.TwoLevelK` it is the faster one: 0.19 s against 1.58 s for 100k
-SIFT rows at k = 511 on 8 cores, at the same squared error. On
-well-separated clusters with k equal to their count `Fit` is several times
-more accurate. Above `kmeans.TwoLevelK` it is `Fit`.
 
 `Build` returns a `FloatTree`: exact float32 centroids, `Leaf`, `Upsert`
 and a wire format. For a smaller immutable router, `BuildTree` builds the
