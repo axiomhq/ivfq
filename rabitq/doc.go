@@ -6,5 +6,8 @@
 // column and returns, per row, a higher-is-better estimate of the exact
 // score and an upper bound on it that holds at a stated confidence;
 // Query.Exact drops the bound for a caller that wants certainty and
-// reranks every row exactly. Columns marshal to a versioned binary form.
+// reranks every row exactly. Options.ExBits adds extended RaBitQ codes
+// (Gao et al., arXiv:2409.09913): ExBits more bits per dimension, scored in
+// full by the 1+ExBits-bit code for an estimate whose error halves with each
+// bit. Columns marshal to a versioned binary form.
 package rabitq

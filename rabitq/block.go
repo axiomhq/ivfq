@@ -68,7 +68,7 @@ func (e BlockEncoder[S]) Encode(rows vector.Slice[S]) (Block, error) {
 			return Block{}, err
 		}
 	}
-	code := quantize(n, rows.Dims, func(i int) []float32 { return rows.Row(i, scratch) }, false, e.Rotation)
+	code := quantize(n, rows.Dims, func(i int) []float32 { return rows.Row(i, scratch) }, false, e.Rotation, 0)
 	return Block{col: Quantizer{Dims: rows.Dims, Code: code}, rot: e.Rotation}, nil
 }
 
