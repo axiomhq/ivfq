@@ -35,6 +35,7 @@ type Dense[T vector.Scalar] struct {
 	rows          vector.Slice[T]
 	norms         []float32 // squared norm of each decoded row
 	scale, offset float32   // integer T: decoded = offset + scale*code
+	lut           []float32 // integer T: decoded value of each code byte
 }
 
 // NewDense encodes rows, which must be nonempty, equally wide, at least
@@ -94,6 +95,12 @@ func newDense[T vector.Scalar](n, dims int, row func(i int, dst []float32) []flo
 	case []uint8:
 		d.scale, d.offset = affine(lo, hi, 0, 255)
 	}
+	switch any(d.rows.Data).(type) {
+	case []int8:
+		d.lut = codeTable(func(c int) float64 { return float64(int8(c)) }, d.scale, d.offset)
+	case []uint8:
+		d.lut = codeTable(func(c int) float64 { return float64(uint8(c)) }, d.scale, d.offset)
+	}
 	for i := range n {
 		src := row(i, scratch)
 		switch dst := any(d.rows.Data[i*dims : (i+1)*dims]).(type) {
@@ -145,17 +152,28 @@ func (d Dense[T]) row(i int, dst []float32) []float32 {
 	lo, hi := i*d.rows.Dims, (i+1)*d.rows.Dims
 	switch codes := any(d.rows.Data).(type) {
 	case []int8:
-		return decodeCodes(dst, codes[lo:hi], d.scale, d.offset)
+		return decodeCodes(dst, codes[lo:hi], d.lut)
 	case []uint8:
-		return decodeCodes(dst, codes[lo:hi], d.scale, d.offset)
+		return decodeCodes(dst, codes[lo:hi], d.lut)
 	}
 	return d.rows.Row(i, dst)
 }
 
-func decodeCodes[C int8 | uint8](dst []float32, codes []C, scale, offset float32) []float32 {
+// codeTable is every code byte's decoded value, offset + scale*code,
+// computed in float64 and rounded once.
+func codeTable(code func(c int) float64, scale, offset float32) []float32 {
+	t := make([]float32, 256)
+	for c := range t {
+		t[c] = float32(float64(offset) + float64(scale)*code(c))
+	}
+	return t
+}
+
+func decodeCodes[C int8 | uint8](dst []float32, codes []C, lut []float32) []float32 {
 	dst = dst[:len(codes)]
+	lut = lut[:256]
 	for i, c := range codes {
-		dst[i] = float32(float64(offset) + float64(scale)*float64(c))
+		dst[i] = lut[uint8(c)]
 	}
 	return dst
 }

@@ -35,7 +35,14 @@ func DecodeF16(b []byte) []float32 {
 func DecodeF16Into(dst []float32, b []byte) {
 	_ = b[:2*len(dst)]
 	for i := range dst {
-		dst[i] = float16.Frombits(binary.LittleEndian.Uint16(b[2*i:])).Float32()
+		// Normal halves are a shift and a rebias; the rest use the library.
+		h := binary.LittleEndian.Uint16(b[2*i:])
+		u := uint32(h)
+		if e := u >> 10 & 31; e != 0 && e != 31 {
+			dst[i] = math.Float32frombits(u&0x8000<<16 | (e+112)<<23 | u&0x3ff<<13)
+		} else {
+			dst[i] = float16.Frombits(h).Float32()
+		}
 	}
 }
 

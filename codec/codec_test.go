@@ -1,10 +1,13 @@
 package codec
 
 import (
+	"encoding/binary"
 	"math"
 	"reflect"
 	"slices"
 	"testing"
+
+	"github.com/x448/float16"
 )
 
 // TestF16RoundTripAndOverflow pins what f16 validation relies on: every
@@ -174,4 +177,31 @@ func BenchmarkI8Column(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkDecodeF16(b *testing.B) {
+	v := make([]float32, 4096)
+	for i := range v {
+		v[i] = float32(i%97) * 0.37
+	}
+	enc := EncodeF16(v)
+	dst := make([]float32, len(v))
+	b.SetBytes(int64(len(enc)))
+	for b.Loop() {
+		DecodeF16Into(dst, enc)
+	}
+}
+
+// DecodeF16 must match the library on every bit pattern, including zeros,
+// subnormals, Inf and NaN.
+func TestDecodeF16EveryHalf(t *testing.T) {
+	b := make([]byte, 2<<16)
+	for i := range 1 << 16 {
+		binary.LittleEndian.PutUint16(b[2*i:], uint16(i))
+	}
+	for i, got := range DecodeF16(b) {
+		if want := float16.Frombits(uint16(i)).Float32(); math.Float32bits(got) != math.Float32bits(want) {
+			t.Fatalf("half %#04x: got %#08x, want %#08x", i, math.Float32bits(got), math.Float32bits(want))
+		}
+	}
 }
