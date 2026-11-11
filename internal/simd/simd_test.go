@@ -92,3 +92,74 @@ func TestCosineSimDegenerate(t *testing.T) {
 		t.Errorf("CosineSim of parallel vectors = %v, want 1", got)
 	}
 }
+
+// NonFinite, AddF64 and ScaleF64 match their Go loops bit for bit at every
+// tail length, and NonFinite finds the first bad value wherever it sits.
+func TestF32xKernels(t *testing.T) {
+	r := rand.New(rand.NewPCG(11, 12))
+	old := hasAVX2
+	defer func() { hasAVX2 = old }()
+	for _, n := range []int{0, 1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 768, 771} {
+		x := make([]float32, n)
+		for i := range x {
+			x[i] = float32(r.NormFloat64() * math.Exp(r.NormFloat64()*20))
+		}
+		if n > 1 {
+			x[0], x[n-1] = math.SmallestNonzeroFloat32, -math.MaxFloat32 // finite extremes
+		}
+		s := 1 / math.Sqrt(r.Float64()*1e3+1e-30)
+		var want [2][]float32
+		var sums [2][]float64
+		for k, on := range []bool{true, false} {
+			hasAVX2 = old && on
+			if got := NonFinite(x); got != -1 {
+				t.Fatalf("avx2=%v n=%d: NonFinite = %d on finite values", hasAVX2, n, got)
+			}
+			for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+				for _, at := range []int{0, n / 2, n - 1} {
+					if at < 0 || at >= n {
+						continue
+					}
+					y := append([]float32(nil), x...)
+					y[at] = bad
+					if n > 1 && at < n-1 {
+						y[n-1] = float32(math.NaN()) // a later bad value must not win
+					}
+					if got := NonFinite(y); got != at {
+						t.Fatalf("avx2=%v n=%d: NonFinite = %d, want %d", hasAVX2, n, got, at)
+					}
+				}
+			}
+			sums[k] = make([]float64, n+1)
+			sums[k][n] = 7
+			for i := range sums[k][:n] {
+				sums[k][i] = r.NormFloat64()
+			}
+			if k == 1 {
+				copy(sums[1], sums[0]) // same start for both
+			}
+			want[k] = append([]float32(nil), x...)
+			ScaleF64(want[k], s)
+		}
+		// Recompute AddF64 from equal starts, then compare with a Go loop.
+		base := append([]float64(nil), sums[0]...)
+		for k, on := range []bool{true, false} {
+			hasAVX2 = old && on
+			copy(sums[k], base)
+			AddF64(sums[k], x)
+		}
+		for j := range x {
+			ref := base[j] + float64(x[j])
+			if math.Float64bits(sums[0][j]) != math.Float64bits(ref) || math.Float64bits(sums[1][j]) != math.Float64bits(ref) {
+				t.Fatalf("n=%d j=%d: AddF64 %v %v, want %v", n, j, sums[0][j], sums[1][j], ref)
+			}
+			ref32 := float32(float64(x[j]) * s)
+			if math.Float32bits(want[0][j]) != math.Float32bits(ref32) || math.Float32bits(want[1][j]) != math.Float32bits(ref32) {
+				t.Fatalf("n=%d j=%d: ScaleF64 %v %v, want %v", n, j, want[0][j], want[1][j], ref32)
+			}
+		}
+		if sums[0][n] != 7 || sums[1][n] != 7 {
+			t.Fatalf("n=%d: AddF64 wrote past len(src)", n)
+		}
+	}
+}

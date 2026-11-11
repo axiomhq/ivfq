@@ -381,10 +381,7 @@ func workRow(v []float32, unit bool) []float32 {
 	}
 	row := make([]float32, len(v))
 	copy(row, v)
-	var n float64
-	for _, x := range row {
-		n += float64(x) * float64(x)
-	}
+	n := simd.SumSq(row)
 	if n == 0 {
 		return nil
 	}

@@ -44,16 +44,11 @@ func CosineSim(a, b []float32) float32 {
 }
 
 // Normalize scales v to unit length in place. A zero vector is left as is.
+// The squared norm is SumSq's, in its lane order on every CPU.
 func Normalize(v []float32) {
-	var n float64
-	for _, x := range v {
-		n += float64(x) * float64(x)
-	}
+	n := SumSq(v)
 	if n == 0 {
 		return
 	}
-	s := 1 / math.Sqrt(n)
-	for d := range v {
-		v[d] = float32(float64(v[d]) * s)
-	}
+	ScaleF64(v, 1/math.Sqrt(n))
 }

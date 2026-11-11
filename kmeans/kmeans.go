@@ -363,10 +363,7 @@ func lloyd(ctx context.Context, vecs, centroids [][]float32, assign []int, iters
 		for i, v := range vecs {
 			c := assign[i]
 			counts[c]++
-			row := sums[c*dims : (c+1)*dims]
-			for d, x := range v {
-				row[d] += float64(x)
-			}
+			simd.AddF64(sums[c*dims:(c+1)*dims], v)
 		}
 		claimed := map[int]bool{} // vectors already used to reseed THIS pass
 		for c := 0; c < k; c++ {

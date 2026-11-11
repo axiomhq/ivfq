@@ -87,9 +87,7 @@ func quantize(n, dims int, work func(i int) []float32, unit bool, rot *Rotation)
 			b.Aligns[i] = zeroRowAlign
 			continue
 		}
-		for j, x := range row {
-			sum[j] += float64(x)
-		}
+		simd.AddF64(sum, row)
 		members++
 	}
 	if members > 0 {

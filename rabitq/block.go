@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/axiomhq/ivfq"
+	"github.com/axiomhq/ivfq/internal/simd"
 	"github.com/axiomhq/ivfq/vector"
 	"github.com/x448/float16"
 )
@@ -157,10 +158,8 @@ func decodeQuery[T vector.Scalar](e ivfq.DenseEmbedding[T], dims int) ([]float32
 
 // checkFinite reports row i's first NaN or infinite coordinate.
 func checkFinite(i int, row []float32) error {
-	for j, x := range row {
-		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-			return fmt.Errorf("rabitq: row %d coordinate %d is %v", i, j, x)
-		}
+	if j := simd.NonFinite(row); j >= 0 {
+		return fmt.Errorf("rabitq: row %d coordinate %d is %v", i, j, row[j])
 	}
 	return nil
 }

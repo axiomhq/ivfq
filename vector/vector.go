@@ -5,13 +5,15 @@
 // is how the typed encoders (ivfq.DenseEncoder, rabitq.BlockEncoder) avoid
 // a float32 copy of the whole input.
 //
-// It imports nothing from this module, so every other package may use it.
+// It imports only internal/simd from this module, so every other package
+// may use it.
 package vector
 
 import (
 	"fmt"
 	"math"
 
+	"github.com/axiomhq/ivfq/internal/simd"
 	"github.com/x448/float16"
 )
 
@@ -53,10 +55,8 @@ func (s Slice[T]) Float32Rows() ([][]float32, error) {
 	case []uint8:
 		flat = widenInto(make([]float32, len(d)), d)
 	}
-	for i, x := range flat {
-		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
-			return nil, fmt.Errorf("vector: row %d coordinate %d is %v", i/s.Dims, i%s.Dims, x)
-		}
+	if i := simd.NonFinite(flat); i >= 0 {
+		return nil, fmt.Errorf("vector: row %d coordinate %d is %v", i/s.Dims, i%s.Dims, flat[i])
 	}
 	rows := make([][]float32, len(flat)/s.Dims)
 	for i := range rows {
