@@ -413,6 +413,16 @@ func TestUnmarshalTreeRejectsCorrupt(t *testing.T) {
 	if tree, err := UnmarshalTree(zeroDims); err == nil {
 		t.Fatalf("zero dims: decoded %d leaves", len(tree.leaves))
 	}
+	// An empty tree's dims are bounded by no vector: this 28-byte header
+	// claimed 808 million, and a query sized by Dims() took 3.2 GB.
+	empty := mustBytes(FloatTree{})
+	if _, err := UnmarshalTree(empty); err != nil {
+		t.Fatalf("empty tree: %v", err)
+	}
+	binary.LittleEndian.PutUint32(empty[4:], 0x30303030)
+	if tree, err := UnmarshalTree(empty); err == nil {
+		t.Fatalf("empty tree: decoded %d dims", tree.Dims())
+	}
 }
 
 // A node that both branches and holds leaves passes every ownership count,

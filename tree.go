@@ -608,7 +608,9 @@ func UnmarshalTree(data []byte) (FloatTree, error) {
 		return FloatTree{}, corrupt
 	}
 	root := int(h[2]) - 1
-	if nNodes == 0 && (nLeaves != 0 || root != -1) || nNodes > 0 && root != 0 {
+	// An empty tree has no width: no vector bounds its dims, and the
+	// encoder writes 0, so any other value would size a caller's query.
+	if nNodes == 0 && (nLeaves != 0 || root != -1 || dims != 0) || nNodes > 0 && root != 0 {
 		return FloatTree{}, corrupt
 	}
 	t := FloatTree{dims: int(dims), fanout: int(h[1]), root: root, height: int(h[3]), leaves: make([][]float32, nLeaves), nodes: make([]treeNode, nNodes)}
