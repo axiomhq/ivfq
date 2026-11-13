@@ -515,9 +515,6 @@ func farthest(vecs [][]float32, centroids [][]float32, assign []int, claimed map
 			best, bestD = i, d
 		}
 	}
-	if best == -1 {
-		return 0 // unreachable given the reseed bound; defensive
-	}
 	return best
 }
 
