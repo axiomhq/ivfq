@@ -869,43 +869,18 @@ func finiteNorm(v []float32) (float64, bool) {
 	return n, !math.IsNaN(n) && !math.IsInf(n, 0)
 }
 
-// nearestHolder descends the hierarchy the way nearestInto does — same
-// scan-by-norm-identity ranking, beam = fanout — but keeps the visited
-// leaf holders instead of their leaves, and returns the holder whose
-// centroid is nearest to q (ties by lower id, -1 for an empty tree).
-// Upsert's appends and replaces place leaves with it.
+// nearestHolder descends the hierarchy as nearestInto does (beamHolders,
+// beam = fanout) and returns the visited holder whose centroid is nearest
+// to q (ties by lower id, -1 for an empty tree). Upsert's appends and
+// replaces place leaves with it.
 func (t FloatTree) nearestHolder(q []float32) int {
 	if len(t.nodes) == 0 || len(q) != t.dims {
 		return -1
 	}
-	beam := max(t.fanout, 2)
-	var w treeWorkspace
-	w.next = make([]rankedNode, 0, min(beam, len(t.nodes)))
-	w.active = append(w.active[:0], t.root)
+	w := workspaces.Get().(*treeWorkspace)
+	defer workspaces.Put(w)
 	qq := Dot(q, q)
-	for len(w.active) > 0 {
-		w.next = w.next[:0]
-		for _, id := range w.active {
-			n := &t.nodes[id]
-			if len(n.children) == 0 {
-				w.holders = append(w.holders, id)
-				continue
-			}
-			for j, cid := range n.children {
-				c := n.block[j*t.dims : (j+1)*t.dims]
-				d := float64(qq) + float64(n.norms[j]) - 2*float64(Dot(q, c))
-				w.next = append(w.next, rankedNode{cid, float32(d)})
-			}
-		}
-		if len(w.next) == 0 {
-			break
-		}
-		w.best = selectNearest(w.best[:0], w.next, beam)
-		w.active = w.active[:0]
-		for _, x := range w.best {
-			w.active = append(w.active, x.id)
-		}
-	}
+	t.beamHolders(w, q, qq, max(t.fanout, 2))
 	bestID, bestD := -1, float32(math.Inf(1))
 	for _, id := range w.holders {
 		c := t.nodes[id].centroid
