@@ -216,7 +216,7 @@ func meanIDs(v [][]float32, ids []int) []float32 {
 
 // Nearest returns up to probe leaf centroid indices, nearest first.
 func (t FloatTree) Nearest(q []float32, probe int) []int {
-	ids, _ := t.nearestBeam(q, probe, probe)
+	ids, _ := t.EvaluationsBeam(q, probe, probe)
 	return ids
 }
 
@@ -228,7 +228,13 @@ func (t FloatTree) Nearest(q []float32, probe int) []int {
 // node it dropped. beam may be smaller than probe, and the result is still
 // the probe nearest leaves the beam reached.
 func (t FloatTree) EvaluationsBeam(q []float32, beam, probe int) ([]int, int) {
-	return t.nearestBeam(q, beam, probe)
+	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
+		return nil, 0
+	}
+	w := workspaces.Get().(*treeWorkspace)
+	defer workspaces.Put(w)
+	best, evals := t.nearestInto(w, q, beam, probe)
+	return idsOf(best), evals
 }
 
 // Searcher is Nearest, Assign and TwoStageAssign with scratch that
@@ -310,17 +316,7 @@ func (w *treeWorkspace) dotsOf(q, block []float32, n int) []float32 {
 	return w.dots
 }
 
-func (t FloatTree) nearestBeam(q []float32, beam, probe int) ([]int, int) {
-	if len(t.nodes) == 0 || probe <= 0 || beam <= 0 || len(q) != t.dims {
-		return nil, 0
-	}
-	w := workspaces.Get().(*treeWorkspace)
-	defer workspaces.Put(w)
-	best, evals := t.nearestInto(w, q, beam, probe)
-	return idsOf(best), evals
-}
-
-// workspaces lends nearestBeam its scratch: a query's leaf scan collects a
+// workspaces lends EvaluationsBeam its scratch: a query's leaf scan collects a
 // candidate per scanned leaf, every leaf at a wide beam, and growing that
 // afresh per query was most of a wide search's cost in copies and GC.
 var workspaces = sync.Pool{New: func() any { return new(treeWorkspace) }}

@@ -119,7 +119,7 @@ func (t FloatTree) EvaluationsBeamI8Work(q []float32, beam, probe int) ([]int, T
 	defer workspaces.Put(w)
 	evals := t.beamHolders(w, q, Dot(q, q), beam)
 	if !t.holdersQuantized(w.holders) {
-		ids, e := t.nearestBeam(q, beam, probe)
+		ids, e := t.EvaluationsBeam(q, beam, probe)
 		return ids, TreeWork{Float32: e}
 	}
 	out, work := t.rankHoldersI8(w, q, probe)
