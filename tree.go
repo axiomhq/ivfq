@@ -124,33 +124,49 @@ func (t *FloatTree) index() {
 		}
 	}
 	t.leaves = leaves
-	// Descendant holder lists, children numbered after parents so one
-	// descending pass has every child's list ready. Holders leave sub nil:
-	// their own leaves are the stage-two scan.
-	subs := make([][]int, len(t.nodes))
+	t.indexSubs()
+}
+
+// indexSubs sets every internal node's sub. One array holds every leaf
+// holder in depth-first child order, so a subtree's holders are one run of
+// it and the lists cost O(holders) together, not O(depth × holders): a
+// list per node would let a deep chain over many holders turn a small
+// UnmarshalTree input into gigabytes. Holders leave sub nil: their own
+// leaves are the stage-two scan.
+func (t *FloatTree) indexSubs() {
+	if len(t.nodes) == 0 || len(t.nodes[t.root].children) == 0 {
+		return
+	}
+	// Children are numbered after parents: a descending pass counts each
+	// subtree's holders, then an ascending pass places them.
+	count := make([]int, len(t.nodes))
 	for i := len(t.nodes) - 1; i >= 0; i-- {
+		for _, c := range t.nodes[i].children {
+			if len(t.nodes[c].children) == 0 {
+				count[i]++
+			} else {
+				count[i] += count[c]
+			}
+		}
+	}
+	holders := make([]int, count[t.root])
+	start := make([]int, len(t.nodes))
+	for i := t.root; i < len(t.nodes); i++ {
 		n := &t.nodes[i]
 		if len(n.children) == 0 {
 			continue
 		}
-		total := 0
+		at := start[i]
+		n.sub = holders[at : at+count[i] : at+count[i]]
 		for _, c := range n.children {
 			if len(t.nodes[c].children) == 0 {
-				total++
+				holders[at] = c
+				at++
 			} else {
-				total += len(subs[c])
+				start[c] = at
+				at += count[c]
 			}
 		}
-		s := make([]int, 0, total)
-		for _, c := range n.children {
-			if len(t.nodes[c].children) == 0 {
-				s = append(s, c)
-			} else {
-				s = append(s, subs[c]...)
-			}
-		}
-		subs[i] = s
-		n.sub = s
 	}
 }
 
@@ -557,12 +573,11 @@ func (t FloatTree) MarshalBinary() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// maxTreeDepth bounds the depth UnmarshalTree accepts. index keeps every
-// internal node's descendant holders, so a chain of d nodes costs O(d²)
-// memory: an unbounded chain turns a small blob into gigabytes. Build's
-// depth is about log(leaves) but k-means at fanout 2 can peel one outlier
-// per level on geometrically spread centroids (height ~145 measured at
-// 205 leaves), so the cap leaves wide headroom: a 1024-chain costs ~4 MB.
+// maxTreeDepth bounds the depth UnmarshalTree accepts, so a search never
+// walks an arbitrarily long chain of levels. Build's depth is about
+// log(leaves) but k-means at fanout 2 can peel one outlier per level on
+// geometrically spread centroids (height ~145 measured at 205 leaves), so
+// the cap leaves wide headroom.
 const maxTreeDepth = 1024
 
 // UnmarshalTree decodes MarshalBinary output. Counts are checked against the
@@ -690,7 +705,6 @@ func (t FloatTree) Clone() FloatTree {
 		m.leaves = append([]int(nil), n.leaves...)
 		m.block = append([]float32(nil), n.block...)
 		m.norms = append([]float32(nil), n.norms...)
-		m.sub = append([]int(nil), n.sub...)
 		// An indexed holder's block slots are the leaves it owns, so the
 		// clone's leaf references re-point at the clone's block. Blocks of
 		// an unindexed tree (hand-built in tests) do not back their leaves;
@@ -707,6 +721,7 @@ func (t FloatTree) Clone() FloatTree {
 			c.leaves[id] = append([]float32(nil), v...)
 		}
 	}
+	c.indexSubs()
 	return c
 }
 

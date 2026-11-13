@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -317,6 +318,43 @@ func twoBucketSize(t *testing.T, tree *FloatTree, q []float32) int {
 		}
 	}
 	return total
+}
+
+// TestUnmarshalTreeDeepChainMemory: a chain of maxTreeDepth one-child nodes
+// ending in many empty holders is a valid encoding, and decoding and
+// cloning it must cost memory in proportion to its bytes. A holder list
+// per internal node made this 250 KB input allocate 160 MB.
+func TestUnmarshalTreeDeepChainMemory(t *testing.T) {
+	const chain, holders = maxTreeDepth, 20_000
+	le := binary.LittleEndian
+	b := []byte("DVT\x01")
+	for _, h := range []uint32{0, 2, 1, chain + 1, 0, chain + holders} { // dims fanout root+1 height leaves nodes
+		b = le.AppendUint32(b, h)
+	}
+	for i := range chain - 1 {
+		b = le.AppendUint32(le.AppendUint32(le.AppendUint32(b, 1), 0), uint32(i+1))
+	}
+	b = le.AppendUint32(le.AppendUint32(b, holders), 0)
+	for h := range holders {
+		b = le.AppendUint32(b, uint32(chain+h))
+	}
+	b = append(b, make([]byte, 8*holders)...) // each holder: no children, no leaves
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	tree, err := UnmarshalTree(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := tree.Clone()
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got > 64*uint64(len(b)) {
+		t.Fatalf("decoding and cloning %d bytes allocated %d", len(b), got)
+	}
+	for _, tr := range []FloatTree{tree, clone} {
+		if n := len(tr.nodes[0].sub); n != holders {
+			t.Fatalf("root sub lists %d holders, want %d", n, holders)
+		}
+	}
 }
 
 // TestUnmarshalTreeRejectsCorrupt: a corrupt encoding must come back as an
