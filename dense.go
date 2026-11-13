@@ -92,13 +92,9 @@ func newDense[T vector.Scalar](n, dims int, row func(i int, dst []float32) []flo
 	switch any(d.rows.Data).(type) {
 	case []int8:
 		d.scale, d.offset = affine(lo, hi, -128, 127)
-	case []uint8:
-		d.scale, d.offset = affine(lo, hi, 0, 255)
-	}
-	switch any(d.rows.Data).(type) {
-	case []int8:
 		d.lut = codeTable(func(c int) float64 { return float64(int8(c)) }, d.scale, d.offset)
 	case []uint8:
+		d.scale, d.offset = affine(lo, hi, 0, 255)
 		d.lut = codeTable(func(c int) float64 { return float64(uint8(c)) }, d.scale, d.offset)
 	}
 	for i := range n {
