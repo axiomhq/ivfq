@@ -246,7 +246,7 @@ func TestBitEstimatorIsUnbiased(t *testing.T) {
 	for _, tc := range []struct {
 		metric ivfq.Metric
 		bits   int
-	}{{ivfq.L2, 0}, {ivfq.Cosine, 0}, {ivfq.L2, 2}, {ivfq.Cosine, 2}} {
+	}{{ivfq.L2, 0}, {ivfq.Cosine, 0}, {ivfq.L2, 1}, {ivfq.Cosine, 1}, {ivfq.L2, 2}, {ivfq.Cosine, 2}, {ivfq.L2, 3}, {ivfq.Cosine, 3}} {
 		metric := tc.metric
 		vectors := corpus(2000, 128)
 		queries := corpus(60, 128)
@@ -301,7 +301,7 @@ func TestBitBoundCoversAtItsConfidence(t *testing.T) {
 		for _, mb := range []struct {
 			metric ivfq.Metric
 			bits   int
-		}{{ivfq.L2, 0}, {ivfq.Cosine, 0}, {ivfq.L2, 2}, {ivfq.Cosine, 2}} {
+		}{{ivfq.L2, 0}, {ivfq.Cosine, 0}, {ivfq.L2, 1}, {ivfq.Cosine, 1}, {ivfq.L2, 2}, {ivfq.Cosine, 2}, {ivfq.L2, 3}, {ivfq.Cosine, 3}} {
 			metric := mb.metric
 			codes := mustEncode(t, tc.v, exOpts(metric, len(tc.v[0]), mb.bits))
 			// Two settings of eps0 two orders of magnitude of tail apart:
@@ -543,12 +543,17 @@ func BenchmarkQuantizeL2(b *testing.B) {
 		}
 		vectors[i] = v
 	}
-	opts := Options{Metric: ivfq.L2, Rotation: NewRotation(3, dims)}
-	b.ReportAllocs()
-	for b.Loop() {
-		if _, err := Quantize(vectors, opts); err != nil {
-			b.Fatal(err)
-		}
+	for _, bits := range []int{0, 1, 2, 3} {
+		b.Run(fmt.Sprintf("ex%d", bits), func(b *testing.B) {
+			opts := Options{Metric: ivfq.L2, Rotation: NewRotation(3, dims), ExBits: bits}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := Quantize(vectors, opts); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/rows, "ns/row")
+		})
 	}
 }
 
@@ -882,7 +887,7 @@ func TestV1ColumnsStillLoad(t *testing.T) {
 // rows-only, packed, Select, AppendRows) to the same bytes and scores, and
 // its decoder refuses ex metadata the encoder cannot produce.
 func TestExCodesRoundTrip(t *testing.T) {
-	for _, bits := range []int{1, 2} {
+	for _, bits := range []int{1, 2, 3} {
 		for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
 			name := fmt.Sprintf("%s/ex%d", metric, bits)
 			v := corpus(40, 33) // padding in the last word
@@ -969,9 +974,12 @@ func TestExCodesRoundTrip(t *testing.T) {
 			exOff := len(data) - (1 + 8*40*bits + 8*40)
 			norms := exOff + 1 + 8*40*bits
 			for what, corrupt := range map[string]func([]byte) []byte{
-				"zero ex bits": func(d []byte) []byte { d[exOff] = 0; return d },
-				"7 ex bits":    func(d []byte) []byte { d[exOff] = 7; return d },
-				"short":        func(d []byte) []byte { return d[:len(d)-1] },
+				"zero ex bits":  func(d []byte) []byte { d[exOff] = 0; return d },
+				"7 ex bits":     func(d []byte) []byte { d[exOff] = 7; return d },
+				"short":         func(d []byte) []byte { return d[:len(d)-1] },
+				"short ExNorms": func(d []byte) []byte { return d[:norms+4*20] },
+				"no ExNorms":    func(d []byte) []byte { return d[:norms] },
+				"short planes":  func(d []byte) []byte { return d[:exOff+1+8*40*bits-8] },
 				"NaN ex norm": func(d []byte) []byte {
 					binary.LittleEndian.PutUint32(d[norms:], math.Float32bits(float32(math.NaN())))
 					return d
@@ -987,6 +995,25 @@ func TestExCodesRoundTrip(t *testing.T) {
 				}
 				if _, err := UnmarshalBinaryBorrowed(bad); err == nil {
 					t.Fatalf("%s: borrowed accepted %s", name, what)
+				}
+			}
+			// A flipped plane word is another valid code: the format has
+			// no checksum (a store's blocks carry it), so the column decodes
+			// and must score finitely, within the bound it states.
+			flipped := slices.Clone(data)
+			for i := range 4 { // the word's first 32 dimensions; past 33 is padding
+				flipped[exOff+1+8*40*(bits-1)+8*3+i] ^= 0xff
+			}
+			for _, decode := range []func([]byte) (Quantizer, error){UnmarshalBinary, UnmarshalBinaryBorrowed} {
+				col, err := decode(flipped)
+				if err != nil {
+					t.Fatalf("%s: a flipped plane word does not decode: %v", name, err)
+				}
+				s := col.Scorer(q)
+				for r := range v {
+					if sc, b := s.ScoreAndBound(r); math.IsNaN(float64(sc)) || math.IsInf(float64(sc), 0) || b < sc {
+						t.Fatalf("%s: flipped plane word, row %d scores %v bound %v", name, r, sc, b)
+					}
 				}
 			}
 		}

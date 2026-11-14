@@ -111,7 +111,7 @@ func TestScoreAllAfterUse(t *testing.T) {
 
 func BenchmarkScoreAll(b *testing.B) {
 	v := corpus(256, 128)
-	for _, bits := range []int{0, 2} {
+	for _, bits := range []int{0, 1, 2, 3} {
 		c, err := Quantize(v, Options{Metric: ivfq.L2, Rotation: NewRotation(11, 128), ExBits: bits})
 		if err != nil {
 			b.Fatal(err)
@@ -124,17 +124,20 @@ func BenchmarkScoreAll(b *testing.B) {
 					scores[r] = s.Score(r)
 				}
 			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/256, "ns/row")
 		})
 		c.PackFastScan()
 		b.Run(fmt.Sprintf("ex%d/packed", bits), func(b *testing.B) {
 			for b.Loop() {
 				s.ScoreAll(scores, nil)
 			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/256, "ns/row")
 		})
 		b.Run(fmt.Sprintf("ex%d/packed+bounds", bits), func(b *testing.B) {
 			for b.Loop() {
 				s.ScoreAll(scores, bounds)
 			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/256, "ns/row")
 		})
 	}
 }

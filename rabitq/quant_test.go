@@ -319,18 +319,31 @@ func FuzzUnmarshalBinary(f *testing.F) {
 	}
 	b, _ := col.MarshalBinary()
 	f.Add(b)
-	ex, err := Quantize([][]float32{{1, 2, 3, 4}, {4, 3, 2, 1}, {0, 1, 0, 1}}, Options{Metric: ivfq.L2, Rotation: NewRotation(3, 4), ExBits: 2})
-	if err != nil {
-		f.Fatal(err)
+	for _, bits := range []int{1, 2, 3} {
+		ex, err := Quantize([][]float32{{1, 2, 3, 4}, {4, 3, 2, 1}, {0, 1, 0, 1}}, Options{Metric: ivfq.Cosine, Rotation: NewRotation(3, 4), ExBits: bits})
+		if err != nil {
+			f.Fatal(err)
+		}
+		b, _ = ex.MarshalBinary()
+		f.Add(b)
 	}
-	b, _ = ex.MarshalBinary()
-	f.Add(b)
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, decode := range []func([]byte) (Quantizer, error){UnmarshalBinary, UnmarshalBinaryBorrowed} {
 			q, err := decode(data)
 			if err != nil {
 				continue
+			}
+			// A column that decodes scores without panicking.
+			metric := ivfq.L2
+			if q.Code.Unit {
+				metric = ivfq.Cosine
+			}
+			if q.Dims > 0 && q.Dims <= 1<<12 {
+				s := q.Scorer(NewQuery(make([]float32, q.Dims), metric, NewRotation(q.Code.Seed, q.Dims)))
+				for r := range min(q.Rows(), 64) {
+					s.ScoreAndBound(r)
+				}
 			}
 			out, err := q.MarshalBinary()
 			if err != nil {
