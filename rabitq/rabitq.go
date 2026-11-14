@@ -771,7 +771,7 @@ func (b *Code) sameFrame(o *Code) bool {
 	if b == o {
 		return true
 	}
-	if b == nil || o == nil || b.Seed != o.Seed || b.Unit != o.Unit || b.width() != o.width() {
+	if b == nil || o == nil || b.Seed != o.Seed || b.Unit != o.Unit || b.ExBits != o.ExBits || b.width() != o.width() {
 		return false
 	}
 	if len(b.Centroid) > 0 && len(o.Centroid) == len(b.Centroid) && &b.Centroid[0] == &o.Centroid[0] {
