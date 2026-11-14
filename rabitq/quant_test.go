@@ -319,6 +319,12 @@ func FuzzUnmarshalBinary(f *testing.F) {
 	}
 	b, _ := col.MarshalBinary()
 	f.Add(b)
+	ex, err := Quantize([][]float32{{1, 2, 3, 4}, {4, 3, 2, 1}, {0, 1, 0, 1}}, Options{Metric: ivfq.L2, Rotation: NewRotation(3, 4), ExBits: 2})
+	if err != nil {
+		f.Fatal(err)
+	}
+	b, _ = ex.MarshalBinary()
+	f.Add(b)
 	f.Add([]byte{})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for _, decode := range []func([]byte) (Quantizer, error){UnmarshalBinary, UnmarshalBinaryBorrowed} {
