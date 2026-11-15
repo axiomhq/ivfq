@@ -24,11 +24,27 @@ func Dot(a, b []float32) float32 {
 
 // L2Sq returns the squared euclidean distance between a and b.
 func L2Sq(a, b []float32) float32 {
-	if hasAVX512F && len(a) > 0 && len(b) == len(a) {
-		return l2sqF32AVX512(&a[0], &b[0], len(a))
+	if len(a) != len(b) {
+		panic("ivfq: L2Sq: slice length mismatch")
 	}
-	d := floats.Float32Distance(a, b)
-	return d * d
+	// Match SumSq's four float64 lanes on every CPU, without a sqrt or FMA.
+	n4 := len(a) &^ 3
+	var s float64
+	if hasAVX2FMA && n4 > 0 {
+		s = l2sq(&a[0], &b[0], n4)
+	} else {
+		var lanes [4]float64
+		for i := 0; i < n4; i++ {
+			d := float64(a[i]) - float64(b[i])
+			lanes[i&3] += float64(d * d)
+		}
+		s = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
+	}
+	for i := n4; i < len(a); i++ {
+		d := float64(a[i]) - float64(b[i])
+		s += float64(d * d)
+	}
+	return float32(s)
 }
 
 // CosineSim returns the cosine similarity of a and b. A zero vector, or one

@@ -3,8 +3,10 @@ package simd
 //go:noescape
 func dotsF32AVX512(q *float32, block *float32, dims, rows int, out *float32)
 
+// l2sq sums squared float64 differences for n a positive multiple of 4.
+//
 //go:noescape
-func l2sqF32AVX512(a *float32, b *float32, n int) float32
+func l2sq(a *float32, b *float32, n int) float64
 
 // nonFinite is NonFinite's test for n a multiple of 8, n >= 8.
 //
