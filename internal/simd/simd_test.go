@@ -29,6 +29,9 @@ func TestF32Kernels(t *testing.T) {
 	defer func() { hasAVX512F = old }()
 	for _, on := range []bool{true, false} {
 		hasAVX512F = old && on
+		if got := L2Sq([]float32{0, 0}, []float32{3, 3}); got != 18 {
+			t.Fatalf("avx512=%v: L2Sq([0 0], [3 3]) = %v, want 18", hasAVX512F, got)
+		}
 		for _, n := range []int{1, 2, 15, 16, 17, 31, 48, 63, 64, 65, 79, 80, 128, 129, 255, 256, 257, 768, 1537} {
 			a, b := make([]float32, n), make([]float32, n)
 			var dot, l2, magD, magL float64
@@ -47,6 +50,54 @@ func TestF32Kernels(t *testing.T) {
 	}
 }
 
+// L2Sq has one 64-lane order in Go and SIMD, including unaligned tails.
+func TestL2SqLanes(t *testing.T) {
+	r := rand.New(rand.NewPCG(23, 24))
+	old512, old2 := hasAVX512F, hasAVX2
+	defer func() { hasAVX512F, hasAVX2 = old512, old2 }()
+	for _, n := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 767, 768, 769} {
+		for pattern := range 2 {
+			a, b := make([]float32, n+1)[1:], make([]float32, n+1)[1:]
+			for i := range a {
+				a[i], b[i] = float32(r.NormFloat64()*10), float32(r.NormFloat64()*10)
+				if pattern == 1 {
+					a[i], b[i] = 1e-5, 0
+				}
+			}
+			if pattern == 1 && n >= 2 {
+				a[0], a[1] = 4096, 1 // Tiny terms must collect before the final reduction.
+			}
+			var lanes [64]float32
+			for lane := range lanes {
+				for i := lane; i < n; i += 64 {
+					d := a[i] - b[i]
+					lanes[lane] += float32(d * d)
+				}
+			}
+			// Fold adjacent 16-lane quarters first, then halves of each width.
+			for width := 32; width >= 16; width /= 2 {
+				for base := 0; base < width; base += 16 {
+					for j := range 16 {
+						lanes[base+j] = lanes[2*base+j] + lanes[2*base+j+16]
+					}
+				}
+			}
+			for width := 8; width > 0; width /= 2 {
+				for j := range width {
+					lanes[j] += lanes[j+width]
+				}
+			}
+			want := lanes[0]
+			for mode := range 3 {
+				hasAVX512F, hasAVX2 = old512 && mode == 0, old2 && mode < 2
+				if got := L2Sq(a, b); math.Float32bits(got) != math.Float32bits(want) {
+					t.Fatalf("mode=%d n=%d pattern=%d: L2Sq = %v, want %v", mode, n, pattern, got, want)
+				}
+			}
+		}
+	}
+}
+
 // A broken length precondition panics with and without the vector kernels,
 // instead of reading or writing outside the slices. The short slices keep
 // spare capacity, which a slice-expression guard would accept.
@@ -58,6 +109,8 @@ func TestShapeMismatchPanics(t *testing.T) {
 		for name, f := range map[string]func(){
 			"Dot":             func() { Dot(make([]float32, 16), make([]float32, 17)) },
 			"L2Sq":            func() { L2Sq(make([]float32, 16), make([]float32, 17)) },
+			"L2SqShort":       func() { L2Sq(make([]float32, 17), make([]float32, 16, 17)) },
+			"L2SqEmpty":       func() { L2Sq(nil, []float32{1}) },
 			"FWHT":            func() { FWHT(make([]float32, 24)) },
 			"FWHTRows":        func() { FWHTRows(make([]float32, 3*FillBlock), 3) },
 			"DecodeI8":        func() { DecodeI8(make([]float32, 16), make([]byte, 8, 16)) },

@@ -95,7 +95,7 @@ func (m *Metric) UnmarshalText(text []byte) error {
 }
 
 // Dot returns the inner product. With precomputed squared norms it gives a
-// squared distance without the sqrt L2Sq pays: |a-b|^2 = |a|^2 + |b|^2 - 2 a.b.
+// squared distance: |a-b|^2 = |a|^2 + |b|^2 - 2 a.b.
 // The subtraction loses a few low bits when a and b are much longer than
 // their difference, so callers rank with it; they do not report it.
 func Dot(a, b []float32) float32 { return simd.Dot(a, b) }

@@ -23,12 +23,36 @@ func Dot(a, b []float32) float32 {
 }
 
 // L2Sq returns the squared euclidean distance between a and b.
+// Coordinate i accumulates in float32 lane i&63, including the final partial
+// block. Products round before addition (no FMA). The 64 lanes fold to 16 as
+// (lane[j]+lane[j+16])+(lane[j+32]+lane[j+48]), then by offsets 8, 4, 2, 1.
+// Go, AVX2 and AVX-512 use this order, without a square root.
 func L2Sq(a, b []float32) float32 {
-	if hasAVX512F && len(a) > 0 && len(b) == len(a) {
-		return l2sqF32AVX512(&a[0], &b[0], len(a))
+	if len(a) != len(b) {
+		panic("ivfq: L2Sq: slice length mismatch")
 	}
-	d := floats.Float32Distance(a, b)
-	return d * d
+	if len(a) > 0 {
+		if hasAVX512F {
+			return l2sqF32AVX512(&a[0], &b[0], len(a))
+		}
+		if hasAVX2 {
+			return l2sqF32AVX2(&a[0], &b[0], len(a))
+		}
+	}
+	var lanes [64]float32
+	for i := range a {
+		d := a[i] - b[i]
+		lanes[i&63] += float32(d * d)
+	}
+	for j := range 16 {
+		lanes[j] = (lanes[j] + lanes[j+16]) + (lanes[j+32] + lanes[j+48])
+	}
+	for offset := 8; offset > 0; offset /= 2 {
+		for j := range offset {
+			lanes[j] += lanes[j+offset]
+		}
+	}
+	return lanes[0]
 }
 
 // CosineSim returns the cosine similarity of a and b. A zero vector, or one
