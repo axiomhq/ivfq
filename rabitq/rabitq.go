@@ -1030,8 +1030,14 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		if b.Unit {
 			scaleBy(resid, q.invNorm)
 		}
-		for j := range resid {
-			resid[j] -= b.centroid(j)
+		if b.borrowed != nil && b.cOff > 0 {
+			for j := range resid {
+				resid[j] -= b.centroid(j)
+			}
+		} else {
+			for j, c := range b.Centroid[:d] {
+				resid[j] -= c
+			}
 		}
 		n = simd.SumSq(resid)
 		if k = residualExp(math.Sqrt(n)); k != 0 {
@@ -1063,18 +1069,8 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		s.planes = make([]uint64, n)
 	}
 	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
-	var sumQ, resid2 float64
-	// The scan's tables hold, for each group of four dimensions, every
-	// subset sum of its codes (subsetSums).
-	if groups := fastGroups(d); groups > 0 {
-		if n := 16 * groups; cap(lut) >= n {
-			s.lut = lut[:n]
-			clear(s.lut)
-		} else {
-			s.lut = make([]byte, n)
-		}
-	}
-	lut = s.lut
+	var resid2 float64
+	s.lut = lut[:0] // built on first use (tables)
 	var codeBuf [512]byte
 	var codes []byte
 	if d <= len(codeBuf) {
@@ -1095,24 +1091,62 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 			resid2 += e * e
 		}
 	}
-	var codeSum int
-	for j, code := range codes {
-		codeSum += int(code)
+	// Eight codes at a time: bit p of each byte, gathered into one byte
+	// (each mask times gather lands byte k's bit at bit 56+k, no carries),
+	// and the bytes' sum (at most 8*15) in the top byte of x*sum8.
+	const lsb, gather, sum8 = 0x0101010101010101, 0x0102040810204080, 0x0101010101010101
+	var codeSum uint64
+	j := 0
+	for ; j+8 <= d; j += 8 {
+		x := binary.LittleEndian.Uint64(codes[j:])
+		codeSum += x * sum8 >> 56
 		w, sh := j/64, uint(j%64)
-		c := uint64(code)
+		p0[w] |= ((x & lsb) * gather >> 56) << sh
+		p1[w] |= ((x >> 1 & lsb) * gather >> 56) << sh
+		p2[w] |= ((x >> 2 & lsb) * gather >> 56) << sh
+		p3[w] |= ((x >> 3 & lsb) * gather >> 56) << sh
+	}
+	for ; j < d; j++ {
+		c, w, sh := uint64(codes[j]), j/64, uint(j%64)
+		codeSum += c
 		p0[w] |= (c & 1) << sh
 		p1[w] |= (c >> 1 & 1) << sh
 		p2[w] |= (c >> 2 & 1) << sh
 		p3[w] |= (c >> 3 & 1) << sh
 	}
-	sumQ = float64(codeSum)
-	for i := 0; lut != nil && i*4 < d; i++ {
-		var c [4]byte // the last group's missing codes are 0
-		copy(c[:], codes[4*i:min(d, 4*i+4)])
-		subsetSums((*[16]byte)(lut[16*i:]), c[0], c[1], c[2], c[3])
-	}
-	s.sumQ, s.resid2 = sumQ, resid2
+	s.sumQ, s.resid2 = float64(codeSum), resid2
 	s.varQ = s.resid2 / float64(d)
+}
+
+// tables is simd.FastScan's tables for the query, built from its planes on
+// first use: a column scored a row at a time never reads them. For each
+// group of four dimensions they hold every subset sum of its codes
+// (subsetSums); nil when the query has no planes or the width no scan.
+func (s *bitScorer) tables() []byte {
+	groups := fastGroups(s.dims)
+	if len(s.lut) > 0 || groups == 0 || len(s.planes) != queryBits*s.words {
+		return s.lut
+	}
+	if n := 16 * groups; cap(s.lut) >= n {
+		s.lut = s.lut[:n]
+		clear(s.lut)
+	} else {
+		s.lut = make([]byte, n)
+	}
+	w := s.words
+	p0, p1, p2, p3 := s.planes[:w], s.planes[w:2*w], s.planes[2*w:3*w], s.planes[3*w:]
+	for i := 0; i*4 < s.dims; i++ { // the last group's missing dimensions have no bits: code 0
+		// Plane p's nibble is row p of a 4x4 bit matrix whose column k is
+		// dimension k's code: transposed (two delta swaps), row k is code k.
+		g, sh := i/16, uint(i%16)*4
+		x := p0[g]>>sh&0xF | (p1[g]>>sh&0xF)<<4 | (p2[g]>>sh&0xF)<<8 | (p3[g]>>sh&0xF)<<12
+		t := (x ^ x>>3) & 0x0A0A
+		x ^= t ^ t<<3
+		t = (x ^ x>>6) & 0x00CC
+		x ^= t ^ t<<6
+		subsetSums((*[16]byte)(s.lut[16*i:]), byte(x&0xF), byte(x>>4&0xF), byte(x>>8&0xF), byte(x>>12))
+	}
+	return s.lut
 }
 
 // rowIP is <x_b, u~>: the four bit-plane popcounts, plus the row's own
@@ -1142,7 +1176,7 @@ func (s *bitScorer) signPop(row int) (ones, weighted uint64) {
 	default: // packed: Σ_j b_j code_j is the row's table entries summed
 		f := b.fast
 		ones = uint64(f.ones[row])
-		if len(s.lut) == 16*f.groups {
+		if len(s.tables()) == 16*f.groups {
 			weighted = s.nibSum(f.nibs, f.groups, row)
 		} else {
 			words := make([]uint64, s.words)
@@ -1308,7 +1342,7 @@ func (s *bitScorer) scoreAll(scores, bounds []float32) {
 		s.scoreAllGlobal(f, scores, bounds)
 		return
 	}
-	if f == nil || s.dead || len(s.lut) != 16*f.groups {
+	if f == nil || s.dead || len(s.tables()) != 16*f.groups {
 		for r := range rows {
 			if bounds != nil {
 				scores[r], bounds[r] = s.scoreAndBound(r)
