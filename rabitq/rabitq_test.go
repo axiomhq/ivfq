@@ -987,7 +987,17 @@ func TestExCodesRoundTrip(t *testing.T) {
 				"tiny ex norm":   func(d []byte) []byte { binary.LittleEndian.PutUint32(d[norms:], math.Float32bits(1)); return d },
 				"ex align > 1":   func(d []byte) []byte { binary.LittleEndian.PutUint32(d[norms+4*40:], math.Float32bits(1.5)); return d },
 				"ex bit padding": func(d []byte) []byte { d[exOff+1+7] |= 0x80; return d },
-				"v1 with ex":     func(d []byte) []byte { binary.LittleEndian.PutUint16(d[4:], bitsVersion); return d },
+				"ex bits on a row with no residual": func(d []byte) []byte {
+					base := bitsHeader + 4*33 // row 0: no norm, alignment or sign bits, but a plane bit
+					clear(d[base : base+4])
+					clear(d[base+4*40 : base+4*40+4])
+					clear(d[base+8*40 : base+8*40+8])
+					clear(d[norms : norms+4])
+					clear(d[norms+4*40 : norms+4*40+4])
+					d[exOff+1] |= 1
+					return d
+				},
+				"v1 with ex": func(d []byte) []byte { binary.LittleEndian.PutUint16(d[4:], bitsVersion); return d },
 			} {
 				bad := corrupt(slices.Clone(data))
 				if _, err := UnmarshalBinary(bad); err == nil {

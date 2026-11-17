@@ -135,7 +135,7 @@ type Code struct {
 	ExNorms  []float32
 	ExAligns []float32
 	// borrowed is the encoded column UnmarshalBinaryBorrowed aliased, read
-	// in place; every other column keeps the typed slices above.
+	// in place, Ex too; every other column keeps the typed slices above.
 	borrowed []byte
 	rows     int
 	dims     int
@@ -287,11 +287,20 @@ func (f *fastLayout) word(i, words int) uint64 { return nibWord(f.nibs, f.groups
 // exWord is word g of ex plane p of row.
 func (b *Code) exWord(row, p, g int) uint64 {
 	w := bitWords(b.width())
+	if b.borrowed != nil {
+		return binary.LittleEndian.Uint64(b.borrowed[b.exOff()+8*((row*b.ExBits+p)*w+g):])
+	}
 	if b.Ex == nil {
 		f := b.fast
 		return nibWord(f.exNibs[p*len(f.nibs):], f.groups, row*w+g, w)
 	}
 	return b.Ex[(row*b.ExBits+p)*w+g]
+}
+
+// exOff is where a borrowed column's ex planes start in its bytes, past
+// the sign words and the ExBits byte.
+func (b *Code) exOff() int {
+	return bitsHeader + b.cOff + 8*b.rows + 8*b.rows*bitWords(b.dims) + 1
 }
 
 // nibWord is fastLayout.word over any plane laid out as nibs.
@@ -663,14 +672,10 @@ func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Qua
 		in.Centroid = centroid
 	}
 	if exBits > 0 {
-		// ponytail: the ex part is decoded even for a borrowed column;
-		// alias it too if decode cost or memory shows.
-		off := bitsHeader + cOff + 8*rows + 8*rows*w + 1
-		in.Ex = make([]uint64, rows*exBits*w)
-		for i := range in.Ex {
-			in.Ex[i] = binary.LittleEndian.Uint64(data[off+8*i:])
-		}
-		off += 8 * len(in.Ex)
+		// The planes are read in place, as the sign words are: Ex stays
+		// nil. ponytail: ExNorms and ExAligns, 8 bytes a row, are still
+		// copied; read them in place too if their decode shows.
+		off := in.exOff() + 8*rows*exBits*w
 		in.ExNorms, in.ExAligns = make([]float32, rows), make([]float32, rows)
 		for i := range rows {
 			in.ExNorms[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[off+4*i:]))
@@ -742,9 +747,11 @@ func (b *Code) checkEx(i int, n float32, w int) error {
 		if yn != 0 || a != 0 {
 			return fmt.Errorf("quant: row %d has no residual but an ex norm %v and alignment %v", i, yn, a)
 		}
-		for _, x := range b.Ex[i*b.ExBits*w : (i+1)*b.ExBits*w] {
-			if x != 0 {
-				return fmt.Errorf("quant: row %d has no residual but carries ex bits", i)
+		for p := range b.ExBits {
+			for g := range w {
+				if b.exWord(i, p, g) != 0 {
+					return fmt.Errorf("quant: row %d has no residual but carries ex bits", i)
+				}
 			}
 		}
 		return nil
@@ -757,7 +764,7 @@ func (b *Code) checkEx(i int, n float32, w int) error {
 	}
 	if pad := uint(w*64 - b.width()); pad > 0 {
 		for p := range b.ExBits {
-			if b.Ex[(i*b.ExBits+p+1)*w-1]>>(64-pad) != 0 {
+			if b.exWord(i, p, w-1)>>(64-pad) != 0 {
 				return fmt.Errorf("quant: row %d sets ex bits past dimension %d", i, b.width())
 			}
 		}
@@ -1209,8 +1216,10 @@ func (s *bitScorer) exRowIP(row int) float64 {
 	ones, weighted = ones<<b.ExBits, weighted<<b.ExBits
 	for p := range b.ExBits {
 		var o, w uint64
-		if b.Ex != nil {
-			off := (row*b.ExBits + p) * s.words
+		off := (row*b.ExBits + p) * s.words
+		if b.borrowed != nil {
+			o, w = simd.BitProductBytes(b.borrowed[b.exOff()+8*off:], s.planes, s.words)
+		} else if b.Ex != nil {
 			o, w = simd.BitProductWords(b.Ex[off:off+s.words], s.planes)
 		} else { // packed, with the scorer's tables: Ex is gone only once packed
 			f := b.fast
@@ -1219,7 +1228,7 @@ func (s *bitScorer) exRowIP(row int) float64 {
 		}
 		ones, weighted = ones+o<<p, weighted+w<<p
 	}
-	if b.Ex == nil {
+	if b.Ex == nil && b.borrowed == nil {
 		ones = uint64(b.fast.exSum[row])
 	}
 	return s.exIPOf(ones, weighted, row)
@@ -1667,7 +1676,7 @@ func (b *Code) retained() int {
 		n = len(f.nibs) + 2*len(f.ones) + 4*len(f.xbc) + 96 // norms and aligns: b.Norms, b.Aligns; rc is the caller's
 		n += len(f.exNibs) + 4*len(f.exSum)
 	}
-	// The ex code is always the column's own, borrowed or not.
+	// The ex code is the column's own unless borrowed; its scalars always are.
 	n += 8*len(b.Ex) + 4*(len(b.ExNorms)+len(b.ExAligns))
 	if b.borrowed != nil {
 		return n // the probe entry already charges the raw column
