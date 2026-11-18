@@ -455,6 +455,14 @@ func (b *Code) fillEx(i int, x []float32) {
 // low_j = e_j when x_j >= 0 (the sign bit's test), 2^bits-1-e_j when not,
 // so c_j - (2^(bits+1)-1)/2 = ±(e_j + 1/2) = y_j. It returns ||y|| and
 // <y, x>/(||y|| ||x||); 0, 0 for a zero x.
+//
+// It runs 64 dimensions (one plane word) at a time: one pass keeps each
+// low_j as a byte, then each plane's word gathers bit p of eight bytes per
+// multiply. n2 and dot add their terms in dimension order, as they always
+// have; ||y||^2 sums (2e_j+1)^2 as an int, which is exact, so it is the
+// same float64 the old y_j*y_j sum (multiples of 1/4, far under 2^53) was.
+// The codes are bit-identical to the one-dimension-at-a-time encoder's
+// (TestExCodeMatchesReference).
 func exCode(x []float32, bits int, t float64, planes []uint64) (yNorm, align float32) {
 	w := bitWords(len(x))
 	var n2 float64
@@ -467,22 +475,32 @@ func exCode(x []float32, bits int, t float64, planes []uint64) (yNorm, align flo
 	n := math.Sqrt(n2)
 	t /= n
 	top := 1<<bits - 1
-	var dot, y2 float64
-	for j, v := range x {
-		a := math.Abs(float64(v))
-		e := min(int(t*a), top)
-		low := e
-		if v < 0 {
-			low = top - e
+	var dot float64
+	var y2x4 int
+	for g := range w {
+		var lows [64]byte
+		for j, v := range x[g*64 : min(g*64+64, len(x))] {
+			a := math.Abs(float64(v))
+			e := min(int(t*a), top)
+			low := e
+			if v < 0 {
+				low = top - e
+			}
+			lows[j] = byte(low)
+			dot += a * (float64(e) + 0.5)
+			y2x4 += (2*e + 1) * (2*e + 1)
 		}
 		for p := range bits {
-			planes[p*w+j/64] |= uint64(low>>p&1) << uint(j%64)
+			var word uint64
+			for k := 0; k < 64; k += 8 {
+				// bit p of each of 8 bytes, gathered into the top byte
+				v := binary.LittleEndian.Uint64(lows[k:])
+				word |= (v >> uint(p) & 0x0101010101010101) * 0x0102040810204080 >> 56 << uint(k)
+			}
+			planes[p*w+g] |= word
 		}
-		y := float64(e) + 0.5
-		dot += a * y
-		y2 += y * y
 	}
-	yn := math.Sqrt(y2)
+	yn := math.Sqrt(float64(y2x4) / 4)
 	return float32(yn), float32(min(1, dot/(n*yn)))
 }
 
@@ -535,7 +553,11 @@ func workRow(v []float32, unit bool) []float32 {
 	if !unit {
 		return v
 	}
-	row := make([]float32, len(v))
+	return unitRow(make([]float32, len(v)), v)
+}
+
+// unitRow is workRow's cosine row written into row.
+func unitRow(row, v []float32) []float32 {
 	copy(row, v)
 	n := simd.SumSq(row)
 	if n == 0 {
