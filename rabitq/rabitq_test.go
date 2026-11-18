@@ -161,6 +161,32 @@ func TestRowsCodesMatchBitCodes(t *testing.T) {
 	}
 }
 
+// UnmarshalRowsBorrowed leaves the centroid's values to the caller: rows
+// decoded against a NaN or infinite centroid still decode, and scoring them
+// does not panic.
+func TestRowsCodesUncheckedCentroid(t *testing.T) {
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		vectors := corpus(64, 129)
+		c := mustEncode(t, vectors, bitOpts(metric, len(vectors[0])))
+		rows, err := c.MarshalRows()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1))} {
+			centroid := slices.Clone(c.Code.Centroid)
+			centroid[5] = bad
+			got, err := UnmarshalRowsBorrowed(rows, centroid)
+			if err != nil {
+				t.Fatalf("%s: a %v centroid: %v", metric, bad, err)
+			}
+			s := got.Scorer(NewQuery(vectors[3], metric, rotOf(got)))
+			for row := 0; row < got.Rows(); row++ {
+				s.ScoreAndBound(row)
+			}
+		}
+	}
+}
+
 // Every scalar a 1-bit score depends on prunes the exact rerank before a
 // full vector is read, so bits the encoder could never write must not decode.
 func TestBitCodesRejectImpossibleMetadata(t *testing.T) {

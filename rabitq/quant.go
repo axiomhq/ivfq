@@ -239,8 +239,11 @@ func (c Quantizer) MarshalRows() ([]byte, error) {
 // one the rows were encoded against: the source column's Code.Centroid,
 // which for a cosine Empty column is normalized rather than Empty's
 // argument. It validates the rows like UnmarshalBinaryBorrowed and keeps
-// them in data, but does not check centroid: the caller must have checked
-// that every value is finite, once for all the codes that share it. The
+// them in data. It checks centroid's width but not its values: the caller
+// must have checked that every value is finite, once for all the codes
+// that share it. A NaN or infinite value gives the rows NaN scores and
+// bounds, so they fall out of a search with no error (a cosine zero row
+// still scores 0, and a Query.Exact bound is +Inf as always). The
 // caller must keep data and centroid immutable and alive; codes
 // that share a centroid slice are one frame (SameFrame) without comparing
 // it.

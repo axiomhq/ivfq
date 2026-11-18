@@ -635,7 +635,9 @@ func (b *Code) marshal(dims int, withCentroid bool) ([]byte, error) {
 // nonnegative residual norm, an alignment inside the range the encoder can
 // produce (it is <x_b, x> for a unit x, so it cannot be below 1/sqrt(D) nor
 // above 1), the agreement between "no residual" and "no alignment", and
-// zero padding in the bits past the last dimension.
+// zero padding in the bits past the last dimension. The one exception is a
+// DQR1 part's centroid: its width is checked here, its values are the
+// caller's to check (UnmarshalRowsBorrowed).
 func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Quantizer, error) {
 	magic := rowsMagic
 	if withCentroid {
