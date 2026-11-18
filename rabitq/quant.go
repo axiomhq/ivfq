@@ -59,14 +59,14 @@ func Quantize(vectors [][]float32, opts Options) (Quantizer, error) {
 		}
 	}
 	unit := opts.Metric == ivfq.Cosine
-	work := vectors
+	work := func(i int) []float32 { return vectors[i] }
 	if unit {
-		work = make([][]float32, len(vectors))
-		for i, v := range vectors {
-			work[i] = workRow(v, true)
-		}
+		// One reused row, normalized again on each of quantize's two reads,
+		// in place of a normalized copy of every row held at once.
+		row := make([]float32, dims)
+		work = func(i int) []float32 { return unitRow(row, vectors[i]) }
 	}
-	return Quantizer{Dims: dims, Code: quantize(len(work), dims, func(i int) []float32 { return work[i] }, unit, opts.Rotation, opts.ExBits)}, nil
+	return Quantizer{Dims: dims, Code: quantize(len(vectors), dims, work, unit, opts.Rotation, opts.ExBits)}, nil
 }
 
 // quantize is Quantize over n rows read by work, each in the frame it is
