@@ -709,7 +709,9 @@ func decodeBits(data []byte, withCentroid, borrow bool, centroid []float32) (Qua
 		code = in.copyRows(dims, rows, 0, nil)
 		b = code
 	}
-	for i := 0; i < dims; i++ {
+	// A caller's centroid (UnmarshalRowsBorrowed) is the caller's to check,
+	// once for every block that shares it.
+	for i := 0; withCentroid && i < dims; i++ {
 		x := b.centroid(i)
 		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
 			return Quantizer{}, fmt.Errorf("rabitq: centroid dimension %d is %v", i, x)

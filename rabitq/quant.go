@@ -238,8 +238,10 @@ func (c Quantizer) MarshalRows() ([]byte, error) {
 // UnmarshalRowsBorrowed decodes MarshalRows output against centroid, the
 // one the rows were encoded against: the source column's Code.Centroid,
 // which for a cosine Empty column is normalized rather than Empty's
-// argument. It validates like UnmarshalBinaryBorrowed and keeps the rows in
-// data. The caller must keep data and centroid immutable and alive; codes
+// argument. It validates the rows like UnmarshalBinaryBorrowed and keeps
+// them in data, but does not check centroid: the caller must have checked
+// that every value is finite, once for all the codes that share it. The
+// caller must keep data and centroid immutable and alive; codes
 // that share a centroid slice are one frame (SameFrame) without comparing
 // it.
 func UnmarshalRowsBorrowed(data []byte, centroid []float32) (Quantizer, error) {
