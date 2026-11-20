@@ -43,6 +43,33 @@ func TestRotationOrthogonal(t *testing.T) {
 	}
 }
 
+// ApplyTranspose undoes Apply, and Apply undoes it, at every block shape.
+func TestRotationTransposeInverts(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 8))
+	for _, dims := range []int{2, 3, 5, 33, 100, 768, 1536} {
+		rot := NewRotation(Seed("t", "t"), dims)
+		v := make([]float32, dims)
+		for i := range v {
+			v[i] = float32(rng.NormFloat64())
+		}
+		for _, order := range []string{"apply then transpose", "transpose then apply"} {
+			w := append([]float32(nil), v...)
+			if order == "apply then transpose" {
+				rot.Apply(w)
+				rot.ApplyTranspose(w)
+			} else {
+				rot.ApplyTranspose(w)
+				rot.Apply(w)
+			}
+			for i := range v {
+				if math.Abs(float64(w[i]-v[i])) > 1e-5 {
+					t.Fatalf("dims=%d, %s: coordinate %d %v, want %v", dims, order, i, w[i], v[i])
+				}
+			}
+		}
+	}
+}
+
 // A one-hot vector, the worst case for a corpus aligned to the axes, must
 // spread: no rotated coordinate may hold much of its energy.
 func TestRotationSpreadsOneHot(t *testing.T) {

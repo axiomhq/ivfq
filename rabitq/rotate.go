@@ -122,6 +122,41 @@ func (r *Rotation) Apply(v []float32) {
 	r.pool.Put(sp)
 }
 
+// ApplyTranspose rotates v in place by the transpose of Apply, its inverse:
+// a vector in the rotated frame, such as a center fitted on rotated rows,
+// back to the original one. v must be r.dims long.
+//
+// Apply is S·H·D3·P3 · S·H·D2·P2 · S·H·D1·P1: per round a permutation P,
+// random signs D, a Walsh-Hadamard transform H of each block, and the
+// blocks' scale S (Apply folds each round's S into the next round's coef).
+// S·H is symmetric and its own inverse, so the transpose runs the rounds
+// backwards: S·H, then the round's signs, then its permutation inverted.
+func (r *Rotation) ApplyTranspose(v []float32) {
+	if r.dims <= 1 {
+		return
+	}
+	_ = v[r.dims-1]
+	sp := r.scratch(r.dims)
+	tmp := (*sp)[:r.dims]
+	for round := len(r.perm) - 1; round >= 0; round-- {
+		off := 0
+		for _, s := range r.blocks {
+			simd.FWHT(v[off : off+s])
+			off += s
+		}
+		simd.Scale(v, v, r.final)
+		for i, p := range r.perm[round] {
+			if r.coef[round][i] < 0 {
+				tmp[p] = -v[i]
+			} else {
+				tmp[p] = v[i]
+			}
+		}
+		copy(v, tmp)
+	}
+	r.pool.Put(sp)
+}
+
 // applyBlock rotates a dimension-major block of simd.FillBlock rows
 // (block[j*simd.FillBlock+r] is dim j of row r): Apply on each row, bit for
 // bit, across the block at once. block must be r.dims*simd.FillBlock long.
