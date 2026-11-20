@@ -113,6 +113,10 @@ func CosineSim(a, b []float32) float32 { return simd.CosineSim(a, b) }
 // Normalize scales v to unit length in place. A zero-norm v is left as is.
 func Normalize(v []float32) { simd.Normalize(v) }
 
+// AddF64 adds float64(src[j]) to dst[j], as a float64 sum of float32 rows
+// does element by element, bit for bit. dst must be at least len(src) long.
+func AddF64(dst []float64, src []float32) { simd.AddF64(dst, src) }
+
 // Score is q against v under metric as a "higher is better" score: the
 // negated squared distance for L2, the similarity for Cosine, the inner
 // product for InnerProduct. An unknown Metric is a programming error and
