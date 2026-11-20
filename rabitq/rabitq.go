@@ -842,14 +842,18 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 		}
 	}
 	rot.Apply(scratch)
+	// Branch-free: the signs of a rotated residual are coin flips, so a
+	// branch on each mispredicts half the time. absSum += |x| is the same
+	// float64 sum as adding x or subtracting a negative x.
 	var absSum float64
+	words := b.Words[i*w : (i+1)*w]
 	for j, x := range scratch {
+		var bit uint64
 		if x >= 0 {
-			b.Words[i*w+j/64] |= 1 << uint(j%64)
-			absSum += float64(x)
-		} else {
-			absSum -= float64(x)
+			bit = 1
 		}
+		words[j>>6] |= bit << (uint(j) & 63)
+		absSum += math.Abs(float64(x))
 	}
 	// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = scratch/(n*2^k).
 	align := absSum / (math.Ldexp(n, k) * math.Sqrt(float64(dims)))

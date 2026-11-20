@@ -189,7 +189,7 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 	}
 	rows := b.Rows()
 	out := b.copyRows(dims, rows, len(vectors), nil)
-	scratch := make([]float32, dims)
+	scratch, unit := make([]float32, dims), make([]float32, dims) // fillRow only reads the row
 	for i, v := range vectors {
 		if len(v) != dims {
 			return Quantizer{}, fmt.Errorf("rabitq: appended row %d is %d-wide, the column is %d", i, len(v), dims)
@@ -197,7 +197,10 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 		if err := checkFinite(i, v); err != nil {
 			return Quantizer{}, err
 		}
-		row := workRow(v, b.Unit)
+		row := v
+		if b.Unit {
+			row = unitRow(unit, v)
+		}
 		if row == nil {
 			out.Aligns[rows+i] = zeroRowAlign
 			continue
