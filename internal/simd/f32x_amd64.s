@@ -45,6 +45,26 @@ loop:
 	VZEROUPPER
 	RET
 
+// func addF32(dst *float32, src *float32, n int)
+// n is a multiple of 8, n >= 8.
+TEXT ·addF32(SB), NOSPLIT, $0-24
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ n+16(FP), CX
+	SHRQ $3, CX
+
+loop:
+	VMOVUPS (SI), Y0
+	VADDPS (DI), Y0, Y0
+	VMOVUPS Y0, (DI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	DECQ CX
+	JNZ  loop
+
+	VZEROUPPER
+	RET
+
 // func scaleF64(x *float32, n int, s float64)
 // n is a multiple of 4, n >= 4.
 TEXT ·scaleF64(SB), NOSPLIT, $0-24

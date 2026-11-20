@@ -146,7 +146,7 @@ func TestCosineSimDegenerate(t *testing.T) {
 	}
 }
 
-// NonFinite, AddF64 and ScaleF64 match their Go loops bit for bit at every
+// NonFinite, AddF64, AddF32 and ScaleF64 match their Go loops bit for bit at every
 // tail length, and NonFinite finds the first bad value wherever it sits.
 func TestF32xKernels(t *testing.T) {
 	r := rand.New(rand.NewPCG(11, 12))
@@ -213,6 +213,26 @@ func TestF32xKernels(t *testing.T) {
 		}
 		if sums[0][n] != 7 || sums[1][n] != 7 {
 			t.Fatalf("n=%d: AddF64 wrote past len(src)", n)
+		}
+		start := make([]float32, n+1)
+		for i := range start[:n] {
+			start[i] = float32(r.NormFloat64() * 1e3)
+		}
+		start[n] = 7
+		var adds [2][]float32
+		for k, on := range []bool{true, false} {
+			hasAVX2 = old && on
+			adds[k] = append([]float32(nil), start...)
+			AddF32(adds[k], x)
+		}
+		for j := range x {
+			ref := start[j] + x[j]
+			if math.Float32bits(adds[0][j]) != math.Float32bits(ref) || math.Float32bits(adds[1][j]) != math.Float32bits(ref) {
+				t.Fatalf("n=%d j=%d: AddF32 %v %v, want %v", n, j, adds[0][j], adds[1][j], ref)
+			}
+		}
+		if adds[0][n] != 7 || adds[1][n] != 7 {
+			t.Fatalf("n=%d: AddF32 wrote past len(src)", n)
 		}
 	}
 }

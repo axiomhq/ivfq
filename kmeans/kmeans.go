@@ -549,9 +549,7 @@ func (c Config) FitBalanced(ctx context.Context, vecs [][]float32) ([][]float32,
 		}
 		for i, v := range vecs {
 			cnt[assign[i]]++
-			for j, x := range v {
-				cents[assign[i]][j] += x
-			}
+			simd.AddF32(cents[assign[i]], v)
 		}
 		for k := range cents {
 			for j := range cents[k] {

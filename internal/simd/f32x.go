@@ -40,6 +40,20 @@ func AddF64(dst []float64, src []float32) {
 	}
 }
 
+// AddF32 adds src[j] to dst[j]. dst must be at least len(src) long.
+func AddF32(dst, src []float32) {
+	dst = dst[:len(src)]
+	n8 := len(src) &^ 7
+	if hasAVX2 && n8 > 0 {
+		addF32(&dst[0], &src[0], n8)
+	} else {
+		n8 = 0
+	}
+	for j := n8; j < len(src); j++ {
+		dst[j] += src[j]
+	}
+}
+
 // ScaleF64 sets x[j] to float32(float64(x[j]) * s).
 func ScaleF64(x []float32, s float64) {
 	n4 := len(x) &^ 3

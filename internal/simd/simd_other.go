@@ -44,4 +44,5 @@ func quantCodes(codes *byte, x *float32, n int, mul, lo, delta, levels float64) 
 
 func nonFinite(x *float32, n int) bool         { panic("unreachable") }
 func addF64(dst *float64, src *float32, n int) { panic("unreachable") }
+func addF32(dst *float32, src *float32, n int) { panic("unreachable") }
 func scaleF64(x *float32, n int, s float64)    { panic("unreachable") }

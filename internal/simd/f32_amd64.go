@@ -21,6 +21,11 @@ func nonFinite(x *float32, n int) bool
 //go:noescape
 func addF64(dst *float64, src *float32, n int)
 
+// addF32 is AddF32 for n a multiple of 8, n >= 8.
+//
+//go:noescape
+func addF32(dst *float32, src *float32, n int)
+
 // scaleF64 is ScaleF64 for n a multiple of 4, n >= 4.
 //
 //go:noescape
