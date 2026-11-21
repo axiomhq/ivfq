@@ -1043,7 +1043,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 		s.dead = true
 		return
 	}
-	var residBuf [512]float32 // on the stack: resid does not escape
+	var residBuf [1024]float32 // on the stack (resid does not escape), up to 1024 dimensions
 	var resid []float32
 	if d <= len(residBuf) {
 		resid = residBuf[:d]
@@ -1108,7 +1108,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
 	var resid2 float64
 	s.lut = lut[:0] // built on first use (tables)
-	var codeBuf [512]byte
+	var codeBuf [1024]byte
 	var codes []byte
 	if d <= len(codeBuf) {
 		codes = codeBuf[:d]
