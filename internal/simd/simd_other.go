@@ -55,3 +55,7 @@ func scoreFast4(n int, sums, ones *uint16, norms, aligns, scores *float32, k *fl
 
 func subSumSq(x, c *float32, n int, lanes *[4]float64)              { panic("unreachable") }
 func planes32(codes *byte, n int, planes *uint64, words int) uint64 { panic("unreachable") }
+func planesLUTAVX2(planes *uint64, words int, lut *byte, pairs int, tbl *byte) {
+	panic("unreachable")
+}
+func unpack1BitAVX2(dst, base *float32, words *uint64, n int, s float32) { panic("unreachable") }

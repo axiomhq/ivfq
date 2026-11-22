@@ -1,6 +1,9 @@
 package simd
 
-import "math"
+import (
+	"math"
+	"math/bits"
+)
 
 // Kernels behind rabitq's encoder and query quantizer. The block kernels run
 // FillBlock rows as independent lanes, so each row's float64 sum adds its
@@ -211,4 +214,66 @@ func Planes(codes []byte, planes []uint64, words int) uint64 {
 		}
 	}
 	return sum
+}
+
+var planesLUTTable = func() [256]byte {
+	var t [256]byte
+	for n := range 16 {
+		for m := range 16 {
+			t[n*16+m] = byte(bits.OnesCount8(uint8(n & m)))
+		}
+	}
+	return t
+}()
+
+// PlanesLUT builds the 16-byte FastScan subset-sum lookup tables for groups
+// groups of 4 dimensions from the 4 bit planes (planes has 4*words uint64s,
+// lut has at least 16*groups bytes). Bit for bit identical to the Go loop.
+func PlanesLUT(planes []uint64, words int, lut []byte, groups int) {
+	if groups <= 0 {
+		return
+	}
+	_ = planes[4*words-1]
+	_ = lut[16*groups-1]
+	g := 0
+	if hasAVX2 && groups >= 2 {
+		pairs := groups / 2
+		planesLUTAVX2(&planes[0], words, &lut[0], pairs, &planesLUTTable[0])
+		g = pairs * 2
+	}
+	for ; g < groups; g++ {
+		w, sh := g/16, uint((g%16)*4)
+		n0 := (planes[w] >> sh) & 0xF
+		n1 := (planes[words+w] >> sh) & 0xF
+		n2 := (planes[2*words+w] >> sh) & 0xF
+		n3 := (planes[3*words+w] >> sh) & 0xF
+		t := lut[16*g : 16*(g+1)]
+		for m := range 16 {
+			t[m] = planesLUTTable[n0*16+uint64(m)] +
+				planesLUTTable[n1*16+uint64(m)]<<1 +
+				planesLUTTable[n2*16+uint64(m)]<<2 +
+				planesLUTTable[n3*16+uint64(m)]<<3
+		}
+	}
+}
+
+// Unpack1Bit sets dst[j] = base[j] + (±s) where bit j of words selects +s (1)
+// or -s (0), bit for bit identical to the Go loop. base and words must cover
+// len(dst).
+func Unpack1Bit(dst, base []float32, words []uint64, s float32) {
+	n := len(dst)
+	if n == 0 {
+		return
+	}
+	_ = base[n-1]
+	_ = words[(n-1)>>6]
+	j := 0
+	if hasAVX2 && n >= 8 {
+		j = n &^ 7
+		unpack1BitAVX2(&dst[0], &base[0], &words[0], j, s)
+	}
+	pm := [2]float32{-s, s}
+	for ; j < n; j++ {
+		dst[j] = base[j] + pm[words[j>>6]>>(uint(j)&63)&1]
+	}
 }

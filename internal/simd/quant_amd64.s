@@ -384,3 +384,122 @@ plloop:
 	MOVQ AX, ret+32(FP)
 	VZEROUPPER
 	RET
+
+// func planesLUTAVX2(planes *uint64, words int, lut *byte, pairs int, tbl *byte)
+// Each byte of each of the 4 planes holds two 4-dim nibbles (low = group 2k,
+// high = group 2k+1). tbl[n*16+m] = popcount(n&m) <= 4, so <<2 and <<3 never
+// cross byte boundaries and the weighted sum stays <= 60.
+TEXT ·planesLUTAVX2(SB), NOSPLIT, $0-40
+	MOVQ planes+0(FP), SI
+	MOVQ words+8(FP), R8
+	SHLQ $3, R8 // a plane's bytes
+	LEAQ (SI)(R8*1), R9
+	LEAQ (R9)(R8*1), R10
+	LEAQ (R10)(R8*1), R11
+	MOVQ lut+16(FP), DI
+	MOVQ pairs+24(FP), CX
+	MOVQ tbl+32(FP), R12
+
+plutloop:
+	MOVBLZX (SI), AX
+	MOVBLZX (R9), BX
+	MOVBLZX (R10), DX
+	MOVBLZX (R11), R8
+
+	// Low nibble: offset = (b & 0x0F) << 4
+	MOVQ AX, R13
+	ANDQ $0x0F, R13
+	SHLQ $4, R13
+	VMOVDQU (R12)(R13*1), X0
+	MOVQ BX, R13
+	ANDQ $0x0F, R13
+	SHLQ $4, R13
+	VMOVDQU (R12)(R13*1), X1
+	VPADDB X1, X1, X1
+	VPADDB X1, X0, X0
+	MOVQ DX, R13
+	ANDQ $0x0F, R13
+	SHLQ $4, R13
+	VMOVDQU (R12)(R13*1), X2
+	VPSLLW $2, X2, X2
+	VPADDB X2, X0, X0
+	MOVQ R8, R13
+	ANDQ $0x0F, R13
+	SHLQ $4, R13
+	VMOVDQU (R12)(R13*1), X3
+	VPSLLW $3, X3, X3
+	VPADDB X3, X0, X0
+	VMOVDQU X0, (DI)
+
+	// High nibble: offset = b & 0xF0
+	ANDQ $0xF0, AX
+	VMOVDQU (R12)(AX*1), X0
+	ANDQ $0xF0, BX
+	VMOVDQU (R12)(BX*1), X1
+	VPADDB X1, X1, X1
+	VPADDB X1, X0, X0
+	ANDQ $0xF0, DX
+	VMOVDQU (R12)(DX*1), X2
+	VPSLLW $2, X2, X2
+	VPADDB X2, X0, X0
+	ANDQ $0xF0, R8
+	VMOVDQU (R12)(R8*1), X3
+	VPSLLW $3, X3, X3
+	VPADDB X3, X0, X0
+	VMOVDQU X0, 16(DI)
+
+	INCQ SI
+	INCQ R9
+	INCQ R10
+	INCQ R11
+	ADDQ $32, DI
+	DECQ CX
+	JNZ  plutloop
+
+	VZEROUPPER
+	RET
+
+DATA unpackBitMask<>+0(SB)/4, $1
+DATA unpackBitMask<>+4(SB)/4, $2
+DATA unpackBitMask<>+8(SB)/4, $4
+DATA unpackBitMask<>+12(SB)/4, $8
+DATA unpackBitMask<>+16(SB)/4, $16
+DATA unpackBitMask<>+20(SB)/4, $32
+DATA unpackBitMask<>+24(SB)/4, $64
+DATA unpackBitMask<>+28(SB)/4, $128
+GLOBL unpackBitMask<>(SB), RODATA|NOPTR, $32
+
+DATA unpackSignBit<>+0(SB)/4, $0x80000000
+GLOBL unpackSignBit<>(SB), RODATA|NOPTR, $4
+
+// func unpack1BitAVX2(dst, base *float32, words *uint64, n int, s float32)
+// Eight floats per byte of words: dst[j] = base[j] + (bit ? +s : -s).
+TEXT ·unpack1BitAVX2(SB), NOSPLIT, $0-36
+	MOVQ dst+0(FP), DI
+	MOVQ base+8(FP), SI
+	MOVQ words+16(FP), BX
+	MOVQ n+24(FP), CX
+	SHRQ $3, CX
+	VBROADCASTSS s+32(FP), Y4
+	VPBROADCASTD unpackSignBit<>(SB), Y5
+	VMOVDQU unpackBitMask<>(SB), Y6
+	VPXOR Y7, Y7, Y7
+
+u1loop:
+	MOVBLZX (BX), AX
+	VMOVD AX, X0
+	VPBROADCASTD X0, Y0
+	VPAND Y6, Y0, Y0
+	VPCMPEQD Y7, Y0, Y0
+	VPAND Y5, Y0, Y0
+	VXORPS Y4, Y0, Y0
+	VADDPS (SI), Y0, Y0
+	VMOVUPS Y0, (DI)
+	INCQ BX
+	ADDQ $32, SI
+	ADDQ $32, DI
+	DECQ CX
+	JNZ  u1loop
+
+	VZEROUPPER
+	RET

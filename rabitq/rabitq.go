@@ -1145,23 +1145,22 @@ func (s *bitScorer) tables() []byte {
 	}
 	// subsetSums from the planes, without the codes: code k is
 	// Σ_p 2^p·(bit k of plane p's nibble), so table entry m is
-	// Σ_p 2^p·(plane p's nibble's subset sum at m), each plane's a 0/1 sum
-	// (planeSums for dimensions 0..2, its bit 3 times every byte for
-	// dimension 3). No lane passes 60: no carries.
-	w := s.words
-	p0, p1, p2, p3 := s.planes[:w], s.planes[w:2*w], s.planes[2*w:3*w], s.planes[3*w:]
-	lut := s.lut[:16*((s.dims+3)/4)] // the last group's missing dimensions have no bits: code 0
-	for g := range p0 {
-		n0, n1, n2, n3 := p0[g], p1[g], p2[g], p3[g]
-		for t := lut[min(len(lut), 256*g):min(len(lut), 256*g+256)]; len(t) >= 16; t = t[16:] {
-			lo := planeSums[n0&7] + planeSums[n1&7]<<1 + planeSums[n2&7]<<2 + planeSums[n3&7]<<3
-			c3 := n0>>3&1 | n1>>2&2 | n2>>1&4 | n3&8
-			binary.LittleEndian.PutUint64(t, lo)
-			binary.LittleEndian.PutUint64(t[8:], lo+c3*0x0101010101010101)
-			n0, n1, n2, n3 = n0>>4, n1>>4, n2>>4, n3>>4
-		}
-	}
+	// Σ_p 2^p·(plane p's nibble's subset sum at m). No lane passes 60.
+	simd.PlanesLUT(s.planes, s.words, s.lut, (s.dims+3)/4)
 	return s.lut
+}
+
+// Reconstruct1Bit writes row's 1-bit RaBitQ reconstruction into dst, using the
+// pre-rotated centroid rc (both length q.Dims). ExBits must be 0.
+func (q *Quantizer) Reconstruct1Bit(dst, rc []float32, row int) {
+	c := q.Code
+	if c.Norms[row] == 0 {
+		copy(dst, rc)
+		return
+	}
+	words := (q.Dims + 63) / 64
+	s := c.Norms[row] / float32(math.Sqrt(float64(q.Dims)/4)) * 0.5
+	simd.Unpack1Bit(dst, rc, c.Words[row*words:(row+1)*words], s)
 }
 
 // rowIP is <x_b, u~>: the four bit-plane popcounts, plus the row's own

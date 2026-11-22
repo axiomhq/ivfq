@@ -338,3 +338,51 @@ func TestSubSumSqAndPlanes(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanesLUTAndUnpack1Bit(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 2))
+	for _, n := range []int{1, 3, 4, 7, 8, 9, 15, 16, 31, 32, 64, 100, 768} {
+		codes := make([]byte, n)
+		for i := range codes {
+			codes[i] = byte(r.IntN(16))
+		}
+		words := (n + 63) / 64
+		planes := make([]uint64, 4*words)
+		Planes(codes, planes, words)
+		groups := (n + 3) / 4
+		got := make([]byte, 16*groups)
+		PlanesLUT(planes, words, got, groups)
+		for g := range groups {
+			for m := range 16 {
+				var want byte
+				for b := range 4 {
+					if m>>b&1 != 0 && g*4+b < n {
+						want += codes[g*4+b]
+					}
+				}
+				if got[16*g+m] != want {
+					t.Fatalf("n=%d group=%d m=%d: got %d, want %d", n, g, m, got[16*g+m], want)
+				}
+			}
+		}
+
+		base := make([]float32, n)
+		for i := range base {
+			base[i] = float32(r.NormFloat64())
+		}
+		bitsW := make([]uint64, words)
+		for i := range bitsW {
+			bitsW[i] = r.Uint64()
+		}
+		s := float32(0.375)
+		dst := make([]float32, n)
+		Unpack1Bit(dst, base, bitsW, s)
+		pm := [2]float32{-s, s}
+		for j := range n {
+			want := base[j] + pm[bitsW[j>>6]>>(uint(j)&63)&1]
+			if math.Float32bits(dst[j]) != math.Float32bits(want) {
+				t.Fatalf("n=%d j=%d: got %v, want %v", n, j, dst[j], want)
+			}
+		}
+	}
+}

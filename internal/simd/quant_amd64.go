@@ -41,3 +41,13 @@ func subSumSq(x, c *float32, n int, lanes *[4]float64)
 //
 //go:noescape
 func planes32(codes *byte, n int, planes *uint64, words int) uint64
+
+// planesLUTAVX2 builds pairs*2 16-byte FastScan LUTs from 4 bit planes.
+//
+//go:noescape
+func planesLUTAVX2(planes *uint64, words int, lut *byte, pairs int, tbl *byte)
+
+// unpack1BitAVX2 sets dst[j] = base[j] + (±s) for n a multiple of 8.
+//
+//go:noescape
+func unpack1BitAVX2(dst, base *float32, words *uint64, n int, s float32)
