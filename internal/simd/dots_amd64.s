@@ -166,3 +166,133 @@ next:
 done:
 	VZEROUPPER
 	RET
+
+// func dots3AVX2FMA(a, b, c, block *float32, dims, rows int, out *float32)
+// out[3*r+k] = Σ row_k[i]*block[r*dims+i], dims a multiple of 8. Block rows
+// go four at a time against the three rows: twelve accumulators, Y(4k+j)
+// for row k and block row j, each fused-multiply-added eight lanes at a
+// time and folded high-onto-low and twice horizontally. A lone block row
+// runs the same sequence for its three sums.
+#define HSUM3(y, x) \
+	VEXTRACTF128 $1, y, X15 \
+	VADDPS X15, x, x \
+	VHADDPS x, x, x \
+	VHADDPS x, x, x
+
+TEXT ·dots3AVX2FMA(SB), NOSPLIT, $0-56
+	MOVQ a+0(FP), AX
+	MOVQ b+8(FP), BX
+	MOVQ c+16(FP), CX
+	MOVQ block+24(FP), SI
+	MOVQ dims+32(FP), DX
+	MOVQ rows+40(FP), R8
+	MOVQ out+48(FP), R9
+	SHLQ $2, DX // a row's bytes
+
+d3quad:
+	CMPQ R8, $4
+	JLT  d3single
+	LEAQ (SI)(DX*1), R10
+	LEAQ (R10)(DX*1), R11
+	LEAQ (R11)(DX*1), R12
+	VXORPS Y0, Y0, Y0
+	VXORPS Y1, Y1, Y1
+	VXORPS Y2, Y2, Y2
+	VXORPS Y3, Y3, Y3
+	VXORPS Y4, Y4, Y4
+	VXORPS Y5, Y5, Y5
+	VXORPS Y6, Y6, Y6
+	VXORPS Y7, Y7, Y7
+	VXORPS Y8, Y8, Y8
+	VXORPS Y9, Y9, Y9
+	VXORPS Y10, Y10, Y10
+	VXORPS Y11, Y11, Y11
+	XORQ DI, DI
+
+d3qloop:
+	VMOVUPS (AX)(DI*1), Y12
+	VMOVUPS (BX)(DI*1), Y13
+	VMOVUPS (CX)(DI*1), Y14
+	VMOVUPS (SI)(DI*1), Y15
+	VFMADD231PS Y15, Y12, Y0
+	VFMADD231PS Y15, Y13, Y4
+	VFMADD231PS Y15, Y14, Y8
+	VMOVUPS (R10)(DI*1), Y15
+	VFMADD231PS Y15, Y12, Y1
+	VFMADD231PS Y15, Y13, Y5
+	VFMADD231PS Y15, Y14, Y9
+	VMOVUPS (R11)(DI*1), Y15
+	VFMADD231PS Y15, Y12, Y2
+	VFMADD231PS Y15, Y13, Y6
+	VFMADD231PS Y15, Y14, Y10
+	VMOVUPS (R12)(DI*1), Y15
+	VFMADD231PS Y15, Y12, Y3
+	VFMADD231PS Y15, Y13, Y7
+	VFMADD231PS Y15, Y14, Y11
+	ADDQ $32, DI
+	CMPQ DI, DX
+	JLT  d3qloop
+
+	HSUM3(Y0, X0)
+	HSUM3(Y4, X4)
+	HSUM3(Y8, X8)
+	HSUM3(Y1, X1)
+	HSUM3(Y5, X5)
+	HSUM3(Y9, X9)
+	HSUM3(Y2, X2)
+	HSUM3(Y6, X6)
+	HSUM3(Y10, X10)
+	HSUM3(Y3, X3)
+	HSUM3(Y7, X7)
+	HSUM3(Y11, X11)
+	VMOVSS X0, (R9)
+	VMOVSS X4, 4(R9)
+	VMOVSS X8, 8(R9)
+	VMOVSS X1, 12(R9)
+	VMOVSS X5, 16(R9)
+	VMOVSS X9, 20(R9)
+	VMOVSS X2, 24(R9)
+	VMOVSS X6, 28(R9)
+	VMOVSS X10, 32(R9)
+	VMOVSS X3, 36(R9)
+	VMOVSS X7, 40(R9)
+	VMOVSS X11, 44(R9)
+	LEAQ (R12)(DX*1), SI
+	ADDQ $48, R9
+	SUBQ $4, R8
+	JMP  d3quad
+
+d3single:
+	TESTQ R8, R8
+	JZ    d3done
+	VXORPS Y0, Y0, Y0
+	VXORPS Y4, Y4, Y4
+	VXORPS Y8, Y8, Y8
+	XORQ DI, DI
+
+d3sloop:
+	VMOVUPS (AX)(DI*1), Y12
+	VMOVUPS (BX)(DI*1), Y13
+	VMOVUPS (CX)(DI*1), Y14
+	VMOVUPS (SI)(DI*1), Y15
+	VFMADD231PS Y15, Y12, Y0
+	VFMADD231PS Y15, Y13, Y4
+	VFMADD231PS Y15, Y14, Y8
+	ADDQ $32, DI
+	CMPQ DI, DX
+	JLT  d3sloop
+
+	HSUM3(Y0, X0)
+	HSUM3(Y4, X4)
+	HSUM3(Y8, X8)
+	VMOVSS X0, (R9)
+	VMOVSS X4, 4(R9)
+	VMOVSS X8, 8(R9)
+	ADDQ DX, SI
+	ADDQ $12, R9
+	DECQ R8
+	JMP  d3single
+
+d3done:
+	VZEROUPPER
+	RET

@@ -136,3 +136,8 @@ func Score(metric Metric, q, v []float32) float32 {
 // Dots sets out[r] to Dot(q, block[r*len(q):(r+1)*len(q)]) for every row
 // of block, bit for bit, in one call.
 func Dots(q, block, out []float32) { simd.Dots(q, block, out) }
+
+// Dots3 sets out[3*r+k] to the dot of row k of (a, b, c) with row r of
+// block in one pass. Each pair's sum does not depend on which rows share
+// the call, but it is not Dot's to the bit.
+func Dots3(a, b, c, block, out []float32) { simd.Dots3(a, b, c, block, out) }

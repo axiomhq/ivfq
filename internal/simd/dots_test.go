@@ -36,3 +36,45 @@ func TestDotsMatchesDot(t *testing.T) {
 		}
 	}
 }
+
+// Dots3 is each row's dot with each block row, within float rounding of a
+// float64 sum, and a pair's value does not depend on the rows beside it:
+// a row against a block equals that row in any slot of any call.
+func TestDots3(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 3))
+	for _, avx := range []bool{true, false} {
+		old := hasAVX2FMA
+		hasAVX2FMA = old && avx
+		for _, dims := range []int{1, 7, 8, 16, 24, 100, 768} {
+			for _, rows := range []int{0, 1, 3, 4, 5, 9, 42} {
+				vec := func(n int) []float32 {
+					v := make([]float32, n)
+					for i := range v {
+						v[i] = float32(rng.NormFloat64())
+					}
+					return v
+				}
+				a, b, c, block := vec(dims), vec(dims), vec(dims), vec(dims*rows)
+				out, alone := make([]float32, 3*rows), make([]float32, 3*rows)
+				Dots3(a, b, c, block, out)
+				for k, row := range [][]float32{a, b, c} {
+					Dots3(vec(dims), row, vec(dims), block, alone)
+					for r := range rows {
+						var want float64
+						for i, x := range row {
+							want += float64(x) * float64(block[r*dims+i])
+						}
+						got := out[3*r+k]
+						if math.Abs(float64(got)-want) > 1e-4*math.Sqrt(float64(dims)) {
+							t.Fatalf("avx=%v dims=%d rows=%d row %d,%d: %v, want %v", avx, dims, rows, k, r, got, want)
+						}
+						if alone[3*r+1] != got {
+							t.Fatalf("avx=%v dims=%d rows=%d row %d,%d: %v in slot %d, %v in slot 1", avx, dims, rows, k, r, got, k, alone[3*r+1])
+						}
+					}
+				}
+			}
+		}
+		hasAVX2FMA = old
+	}
+}
