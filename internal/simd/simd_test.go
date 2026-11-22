@@ -352,6 +352,11 @@ func TestPlanesLUTAndUnpack1Bit(t *testing.T) {
 		groups := (n + 3) / 4
 		got := make([]byte, 16*groups)
 		PlanesLUT(planes, words, got, groups)
+		gotCodes := make([]byte, 16*groups)
+		CodesLUT(codes, gotCodes)
+		if !slices.Equal(got, gotCodes) {
+			t.Fatalf("n=%d: CodesLUT != PlanesLUT", n)
+		}
 		for g := range groups {
 			for m := range 16 {
 				var want byte
@@ -383,6 +388,39 @@ func TestPlanesLUTAndUnpack1Bit(t *testing.T) {
 			if math.Float32bits(dst[j]) != math.Float32bits(want) {
 				t.Fatalf("n=%d j=%d: got %v, want %v", n, j, dst[j], want)
 			}
+		}
+
+		// SubStoreSumSq and SignAbs
+		a, b := make([]float32, n), make([]float32, n)
+		for i := range a {
+			a[i], b[i] = float32(r.NormFloat64()*10), float32(r.NormFloat64()*10)
+		}
+		if n > 0 {
+			a[0] = float32(math.Copysign(0, -1)) // -0.0 must set sign bit 1 (>= 0)
+			b[0] = 0
+		}
+		dst2 := make([]float32, n)
+		gotSS := SubStoreSumSq(dst2, a, b)
+		wantDst := make([]float32, n)
+		for i := range a {
+			wantDst[i] = a[i] - b[i]
+		}
+		wantSS := SumSq(wantDst)
+		if math.Float64bits(gotSS) != math.Float64bits(wantSS) || !slices.Equal(dst2, wantDst) {
+			t.Fatalf("n=%d: SubStoreSumSq %v, want %v", n, gotSS, wantSS)
+		}
+		gotW := make([]uint64, words)
+		gotAbs := SignAbs(a, gotW)
+		wantW := make([]uint64, words)
+		var wantAbs float64
+		for j, v := range a {
+			if v >= 0 {
+				wantW[j>>6] |= 1 << (uint(j) & 63)
+			}
+			wantAbs += math.Abs(float64(v))
+		}
+		if !slices.Equal(gotW, wantW) || math.Abs(gotAbs-wantAbs) > 1e-10*(1+wantAbs) {
+			t.Fatalf("n=%d: SignAbs words/abs mismatch: got %v, want %v", n, gotAbs, wantAbs)
 		}
 	}
 }

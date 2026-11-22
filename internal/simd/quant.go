@@ -277,3 +277,117 @@ func Unpack1Bit(dst, base []float32, words []uint64, s float32) {
 		dst[j] = base[j] + pm[words[j>>6]>>(uint(j)&63)&1]
 	}
 }
+
+// SubStoreSumSq sets dst[j] = a[j] - b[j] in float32 and returns SumSq(dst)
+// in one pass. a and b must be at least len(dst) long.
+func SubStoreSumSq(dst, a, b []float32) float64 {
+	n := len(dst)
+	if n == 0 {
+		return 0
+	}
+	_, _ = a[n-1], b[n-1]
+	n8 := n &^ 7
+	if !hasAVX2FMA || n8 == 0 {
+		for j := range dst {
+			dst[j] = a[j] - b[j]
+		}
+		return SumSq(dst)
+	}
+	var lanes [4]float64
+	subStoreSumSq(&dst[0], &a[0], &b[0], n8, &lanes)
+	for j := n8; j < n; j++ {
+		dst[j] = a[j] - b[j]
+	}
+	n4 := n &^ 3
+	for j := n8; j < n4; j++ {
+		f := float64(dst[j])
+		lanes[j&3] += float64(f * f)
+	}
+	s := (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
+	for _, v := range dst[n4:] {
+		f := float64(v)
+		s += float64(f * f)
+	}
+	return s
+}
+
+// SignAbs sets bit j of words to 1 iff x[j] >= 0 (words must be zeroed and
+// cover len(x)) and returns Σ |float64(x[j])| in the four-lane order.
+func SignAbs(x []float32, words []uint64) float64 {
+	n := len(x)
+	if n == 0 {
+		return 0
+	}
+	_ = words[(n-1)>>6]
+	n8 := n &^ 7
+	var s float64
+	if hasAVX2 && n8 > 0 {
+		var lanes [4]float64
+		signAbsAVX2(&x[0], n8, &words[0], &lanes)
+		n4 := n &^ 3
+		for j := n8; j < n4; j++ {
+			if x[j] >= 0 {
+				words[j>>6] |= 1 << (uint(j) & 63)
+			}
+			lanes[j&3] += math.Abs(float64(x[j]))
+		}
+		s = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
+		for j := n4; j < n; j++ {
+			if x[j] >= 0 {
+				words[j>>6] |= 1 << (uint(j) & 63)
+			}
+			s += math.Abs(float64(x[j]))
+		}
+		return s
+	}
+	for j, v := range x {
+		if v >= 0 {
+			words[j>>6] |= 1 << (uint(j) & 63)
+		}
+		s += math.Abs(float64(v))
+	}
+	return s
+}
+
+// CodesLUT builds the 16-byte FastScan subset-sum lookup tables directly from
+// codes (each code < 16) into lut (at least 16*((len(codes)+3)/4) bytes).
+// Bit for bit identical to PlanesLUT.
+func CodesLUT(codes, lut []byte) {
+	n := len(codes)
+	if n == 0 {
+		return
+	}
+	groups := (n + 3) / 4
+	_ = lut[16*groups-1]
+	j := 0
+	if hasAVX2 && n >= 8 {
+		n8 := n &^ 7
+		codesLUTAVX2(&codes[0], &lut[0], n8>>3)
+		j = n8
+	}
+	for g := j / 4; g < groups; g++ {
+		var c [4]byte
+		for b := range 4 {
+			if g*4+b < n {
+				c[b] = codes[g*4+b]
+			}
+		}
+		t := lut[16*g : 16*(g+1)]
+		for m := range 16 {
+			var s byte
+			if m&1 != 0 {
+				s += c[0]
+			}
+			if m&2 != 0 {
+				s += c[1]
+			}
+			if m&4 != 0 {
+				s += c[2]
+			}
+			if m&8 != 0 {
+				s += c[3]
+			}
+			t[m] = s
+		}
+	}
+}

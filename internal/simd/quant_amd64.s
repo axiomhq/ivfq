@@ -503,3 +503,120 @@ u1loop:
 
 	VZEROUPPER
 	RET
+
+// func subStoreSumSq(dst, a, b *float32, n int, lanes *[4]float64)
+// Eight floats a step: dst = a - b in float32, then 4-lane float64 SumSq.
+TEXT ·subStoreSumSq(SB), NOSPLIT, $0-40
+	MOVQ dst+0(FP), R8
+	MOVQ a+8(FP), SI
+	MOVQ b+16(FP), DX
+	MOVQ n+24(FP), CX
+	MOVQ lanes+32(FP), DI
+	SHRQ $3, CX
+	VXORPD Y0, Y0, Y0
+
+ssssloop:
+	VMOVUPS (SI), Y1
+	VSUBPS (DX), Y1, Y1
+	VMOVUPS Y1, (R8)
+	VCVTPS2PD X1, Y2
+	VEXTRACTF128 $1, Y1, X3
+	VCVTPS2PD X3, Y3
+	VMULPD Y2, Y2, Y2
+	VADDPD Y2, Y0, Y0
+	VMULPD Y3, Y3, Y3
+	VADDPD Y3, Y0, Y0
+	ADDQ $32, SI
+	ADDQ $32, DX
+	ADDQ $32, R8
+	DECQ CX
+	JNZ  ssssloop
+
+	VMOVUPD Y0, (DI)
+	VZEROUPPER
+	RET
+
+DATA signAbsMask<>+0(SB)/4, $0x7fffffff
+GLOBL signAbsMask<>(SB), RODATA|NOPTR, $4
+
+// func signAbsAVX2(x *float32, n int, words *uint64, lanes *[4]float64)
+// Eight floats a step: pack (x >= 0) bits into words and accumulate |x| in
+// four float64 lanes.
+TEXT ·signAbsAVX2(SB), NOSPLIT, $0-32
+	MOVQ x+0(FP), SI
+	MOVQ n+8(FP), CX
+	MOVQ words+16(FP), DI
+	MOVQ lanes+24(FP), DX
+	SHRQ $3, CX
+	VXORPD Y0, Y0, Y0
+	VPBROADCASTD signAbsMask<>(SB), Y6
+	VXORPS Y7, Y7, Y7
+
+saloop:
+	VMOVUPS (SI), Y1
+	VCMPPS $0x1d, Y7, Y1, Y2 // x >= 0.0 (CMP_GE_OQ)
+	VMOVMSKPS Y2, AX
+	MOVB AL, (DI)
+	VANDPS Y6, Y1, Y1
+	VCVTPS2PD X1, Y2
+	VADDPD Y2, Y0, Y0
+	VEXTRACTF128 $1, Y1, X3
+	VCVTPS2PD X3, Y3
+	VADDPD Y3, Y0, Y0
+	ADDQ $32, SI
+	INCQ DI
+	DECQ CX
+	JNZ  saloop
+
+	VMOVUPD Y0, (DX)
+	VZEROUPPER
+	RET
+
+// VPSHUFB masks for CodesLUT: each 16-byte lane selects code b where bit b of
+// entry index m is 1, and 0 (0x80) where bit b is 0.
+DATA clMask0<>+0(SB)/8, $0x0080008000800080
+DATA clMask0<>+8(SB)/8, $0x0080008000800080
+GLOBL clMask0<>(SB), RODATA|NOPTR, $16
+
+DATA clMask1<>+0(SB)/8, $0x0101808001018080
+DATA clMask1<>+8(SB)/8, $0x0101808001018080
+GLOBL clMask1<>(SB), RODATA|NOPTR, $16
+
+DATA clMask2<>+0(SB)/8, $0x0202020280808080
+DATA clMask2<>+8(SB)/8, $0x0202020280808080
+GLOBL clMask2<>(SB), RODATA|NOPTR, $16
+
+DATA clMask3<>+0(SB)/8, $0x8080808080808080
+DATA clMask3<>+8(SB)/8, $0x0303030303030303
+GLOBL clMask3<>(SB), RODATA|NOPTR, $16
+
+// func codesLUTAVX2(codes, lut *byte, pairs int)
+// Eight codes (two 4-dim groups) -> 32 bytes of FastScan LUT per iteration.
+TEXT ·codesLUTAVX2(SB), NOSPLIT, $0-24
+	MOVQ codes+0(FP), SI
+	MOVQ lut+8(FP), DI
+	MOVQ pairs+16(FP), CX
+	VBROADCASTI128 clMask0<>(SB), Y12
+	VBROADCASTI128 clMask1<>(SB), Y13
+	VBROADCASTI128 clMask2<>(SB), Y14
+	VBROADCASTI128 clMask3<>(SB), Y15
+
+clloop:
+	VPBROADCASTD (SI), X0
+	VPBROADCASTD 4(SI), X1
+	VINSERTI128 $1, X1, Y0, Y0
+	VPSHUFB Y12, Y0, Y1
+	VPSHUFB Y13, Y0, Y2
+	VPSHUFB Y14, Y0, Y3
+	VPSHUFB Y15, Y0, Y4
+	VPADDB Y2, Y1, Y1
+	VPADDB Y4, Y3, Y3
+	VPADDB Y3, Y1, Y1
+	VMOVDQU Y1, (DI)
+	ADDQ $8, SI
+	ADDQ $32, DI
+	DECQ CX
+	JNZ  clloop
+
+	VZEROUPPER
+	RET

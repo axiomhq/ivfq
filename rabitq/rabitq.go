@@ -825,12 +825,7 @@ func (b *Code) sameFrame(o *Code) bool {
 func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	dims := len(b.Centroid)
 	w := bitWords(dims)
-	var n float64
-	for j := range scratch {
-		scratch[j] = row[j] - b.Centroid[j]
-		n += float64(scratch[j]) * float64(scratch[j])
-	}
-	n = math.Sqrt(n)
+	n := math.Sqrt(simd.SubStoreSumSq(scratch, row, b.Centroid))
 	b.Norms[i] = float32(n)
 	if b.Norms[i] == 0 {
 		return
@@ -842,19 +837,8 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 		}
 	}
 	rot.Apply(scratch)
-	// Branch-free: the signs of a rotated residual are coin flips, so a
-	// branch on each mispredicts half the time. absSum += |x| is the same
-	// float64 sum as adding x or subtracting a negative x.
-	var absSum float64
 	words := b.Words[i*w : (i+1)*w]
-	for j, x := range scratch {
-		var bit uint64
-		if x >= 0 {
-			bit = 1
-		}
-		words[j>>6] |= bit << (uint(j) & 63)
-		absSum += math.Abs(float64(x))
-	}
+	absSum := simd.SignAbs(scratch, words)
 	// <x_b, x> with x_b = (2bit-1)/sqrt(D) and x = scratch/(n*2^k).
 	align := absSum / (math.Ldexp(n, k) * math.Sqrt(float64(dims)))
 	b.Aligns[i] = float32(min(1, align))
@@ -1126,6 +1110,19 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	codeSum := simd.Planes(codes, s.planes, s.words)
 	s.sumQ, s.resid2 = float64(codeSum), resid2
 	s.varQ = s.resid2 / float64(d)
+	if b.fast != nil {
+		if groups := fastGroups(d); groups > 0 {
+			if n := 16 * groups; cap(lut) >= n {
+				s.lut = lut[:n]
+			} else {
+				s.lut = make([]byte, n)
+			}
+			simd.CodesLUT(codes, s.lut)
+			if tail := 16 * ((d + 3) / 4); tail < len(s.lut) {
+				clear(s.lut[tail:])
+			}
+		}
+	}
 }
 
 // tables is simd.FastScan's tables for the query, built from its planes on
