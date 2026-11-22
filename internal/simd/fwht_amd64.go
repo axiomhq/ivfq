@@ -13,7 +13,7 @@ func fwht8(x *float32, n int)
 //go:noescape
 func fwhtStages(x *float32, n, h0 int)
 
-// permScale is PermScale for n a multiple of 4.
+// permScale is PermScale for n a multiple of 8.
 //
 //go:noescape
 func permScale(dst, src *float32, perm *int32, coef *float32, n int)

@@ -53,8 +53,8 @@ func PermScale(dst, src []float32, perm []int32, coef []float32) {
 	n := len(dst)
 	_, _, _ = perm[n-1], coef[n-1], src[n-1]
 	i := 0
-	if hasAVX2FMA && n >= 4 {
-		i = n &^ 3
+	if hasAVX2FMA && n >= 8 {
+		i = n &^ 7
 		permScale(&dst[0], &src[0], &perm[0], &coef[0], i)
 	}
 	for ; i < n; i++ {
