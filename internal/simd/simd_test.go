@@ -236,3 +236,60 @@ func TestF32xKernels(t *testing.T) {
 		}
 	}
 }
+
+// ScoreFast is its Go loop bit for bit, at both metrics, on zero rows
+// (align -1), rows at the centroid (norm 0), unaligned rows (align 0),
+// rows whose norm gap bounds the distance, and any row count.
+func TestScoreFastMatchesLoop(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 9))
+	for _, n := range []int{0, 3, 4, 5, 8, 33, 530} {
+		sums, ones := make([]uint16, n), make([]uint16, n)
+		norms, aligns := make([]float32, n), make([]float32, n)
+		for i := range n {
+			sums[i], ones[i] = uint16(r.IntN(3000)), uint16(r.IntN(768))
+			norms[i], aligns[i] = float32(r.Float64()*2), float32(0.5+r.Float64()*0.4)
+			switch r.IntN(8) {
+			case 0:
+				aligns[i] = -1
+			case 1:
+				norms[i] = 0
+			case 2:
+				aligns[i] = 0
+			case 3:
+				norms[i] = 40 // far: the gap bounds it
+			}
+		}
+		qn := 0.3 + r.Float64()
+		k := [6]float64{r.Float64() * 0.01, -r.Float64() * 0.05, r.Float64() * 3, 1 / math.Sqrt(768), qn, qn * qn}
+		for _, l2 := range []bool{true, false} {
+			got := make([]float32, n)
+			done := ScoreFast(sums, ones, norms, aligns, &k, l2, got)
+			if hasAVX2 && done != n&^3 {
+				t.Fatalf("n=%d: set %d rows", n, done)
+			}
+			for i := range done {
+				var want float32
+				align := float64(aligns[i])
+				if align != -1 {
+					norm := float64(norms[i])
+					dist2 := norm*norm + k[5]
+					if norm > 0 && align > 0 {
+						dot := 2*(k[0]*float64(sums[i])+k[1]*float64(ones[i])) - k[2]
+						ip := dot * k[3] / align
+						dist2 -= 2 * norm * k[4] * ip
+					}
+					gap := norm - k[4]
+					dist2 = max(dist2, gap*gap)
+					if l2 {
+						want = float32(-dist2)
+					} else {
+						want = float32(min(1, max(-1, 1-dist2/2)))
+					}
+				}
+				if math.Float32bits(got[i]) != math.Float32bits(want) {
+					t.Fatalf("n=%d l2=%v row %d: %v, want %v", n, l2, i, got[i], want)
+				}
+			}
+		}
+	}
+}

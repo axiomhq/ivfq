@@ -1658,7 +1658,11 @@ func (s *bitScorer) scoreFast(f *fastLayout, sums []uint16, scores []float32) {
 	tail := s.delta*s.sumQ + float64(s.dims)*s.low
 	norms, aligns, ones := f.norms[:len(scores)], f.aligns[:len(scores)], f.ones[:len(scores)]
 	sums = sums[:len(scores)]
-	for r := range scores {
+	start := 0
+	if qn > 0 { // four rows a vector, the same bits as the loop below
+		start = simd.ScoreFast(sums, ones, norms, aligns, &[6]float64{delta, lo, tail, scale, qn, q2}, s.l2, scores)
+	}
+	for r := start; r < len(scores); r++ {
 		align := float64(aligns[r])
 		if align == zeroRowAlign {
 			scores[r] = 0

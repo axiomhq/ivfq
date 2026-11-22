@@ -48,3 +48,7 @@ func addF32(dst *float32, src *float32, n int) { panic("unreachable") }
 func scaleF64(x *float32, n int, s float64)    { panic("unreachable") }
 
 func dots3AVX2FMA(a, b, c, block *float32, dims, rows int, out *float32) { panic("unreachable") }
+
+func scoreFast4(n int, sums, ones *uint16, norms, aligns, scores *float32, k *float64, cos int) {
+	panic("unreachable")
+}

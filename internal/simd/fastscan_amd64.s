@@ -21,6 +21,62 @@ block:
 	MOVQ DX, BX
 	MOVQ CX, R9
 
+	// Four pairs at a time: their lookups summed in bytes (four entries
+	// below 64 stay below 256), then widened once.
+quad:
+	CMPQ R9, $4
+	JLT  pairs
+	VMOVDQU (SI), Y4
+	VMOVDQU (BX), Y5
+	VPAND Y15, Y4, Y6
+	VPSRLW $4, Y4, Y7
+	VPAND Y15, Y7, Y7
+	VPSHUFB Y6, Y5, Y10
+	VPSHUFB Y7, Y5, Y11
+	VMOVDQU 32(SI), Y4
+	VMOVDQU 32(BX), Y5
+	VPAND Y15, Y4, Y6
+	VPSRLW $4, Y4, Y7
+	VPAND Y15, Y7, Y7
+	VPSHUFB Y6, Y5, Y6
+	VPSHUFB Y7, Y5, Y7
+	VPADDB Y6, Y10, Y10
+	VPADDB Y7, Y11, Y11
+	VMOVDQU 64(SI), Y4
+	VMOVDQU 64(BX), Y5
+	VPAND Y15, Y4, Y6
+	VPSRLW $4, Y4, Y7
+	VPAND Y15, Y7, Y7
+	VPSHUFB Y6, Y5, Y6
+	VPSHUFB Y7, Y5, Y7
+	VPADDB Y6, Y10, Y10
+	VPADDB Y7, Y11, Y11
+	VMOVDQU 96(SI), Y4
+	VMOVDQU 96(BX), Y5
+	VPAND Y15, Y4, Y6
+	VPSRLW $4, Y4, Y7
+	VPAND Y15, Y7, Y7
+	VPSHUFB Y6, Y5, Y6
+	VPSHUFB Y7, Y5, Y7
+	VPADDB Y6, Y10, Y10
+	VPADDB Y7, Y11, Y11
+	VPAND Y14, Y10, Y8
+	VPADDW Y8, Y0, Y0
+	VPSRLW $8, Y10, Y10
+	VPADDW Y10, Y1, Y1
+	VPAND Y14, Y11, Y8
+	VPADDW Y8, Y2, Y2
+	VPSRLW $8, Y11, Y11
+	VPADDW Y11, Y3, Y3
+	ADDQ $128, SI
+	ADDQ $128, BX
+	SUBQ $4, R9
+	JMP  quad
+
+pairs:
+	TESTQ R9, R9
+	JZ    fold
+
 pair:
 	VMOVDQU (SI), Y4
 	VMOVDQU (BX), Y5
@@ -42,6 +98,7 @@ pair:
 	DECQ R9
 	JNZ  pair
 
+fold:
 	// Fold the two groups' lanes, then interleave even and odd rows.
 	VEXTRACTI128 $1, Y0, X8
 	VPADDW X8, X0, X0

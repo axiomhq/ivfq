@@ -141,3 +141,26 @@ func quantOne(x, lo, delta float64, levels int) (code byte, err float64) {
 	t = min(float64(levels), max(0, t))
 	return byte(t), lo + float64(delta*t) - x
 }
+
+// ScoreFast is rabitq's scoreFast row loop for its first len(scores)&^3
+// rows, four rows to a vector, and returns how many rows it set (0 without
+// AVX2); the caller's Go loop sets the rest. Per row r, with k = delta, low,
+// tail, scale, qNorm, qNorm²: zeroRowAlign rows (align -1) score 0;
+// otherwise dist2 = norm²+q2, less 2·norm·qn·ip where norm, qn and align
+// are positive, ip = (2·(delta·sums[r] + low·ones[r]) - tail)·scale/align,
+// then max(dist2, (norm-qn)²), scored -dist2 (l2) or min(1, max(-1,
+// 1-dist2/2)). Each operation is the Go loop's, unfused, in its order, so
+// the scores are its bits. qn must be positive.
+func ScoreFast(sums, ones []uint16, norms, aligns []float32, k *[6]float64, l2 bool, scores []float32) int {
+	n := len(scores) &^ 3
+	if !hasAVX2 || n == 0 {
+		return 0
+	}
+	_, _, _, _ = sums[n-1], ones[n-1], norms[n-1], aligns[n-1]
+	var cos int
+	if !l2 {
+		cos = 1
+	}
+	scoreFast4(n, &sums[0], &ones[0], &norms[0], &aligns[0], &scores[0], &k[0], cos)
+	return n
+}

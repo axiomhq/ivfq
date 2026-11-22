@@ -25,3 +25,8 @@ func sumSq(x *float32, n int) float64
 //
 //go:noescape
 func quantCodes(codes *byte, x *float32, n int, mul, lo, delta, levels float64) float64
+
+// scoreFast4 is ScoreFast for n a multiple of 4; cos 1 scores cosine.
+//
+//go:noescape
+func scoreFast4(n int, sums, ones *uint16, norms, aligns, scores *float32, k *float64, cos int)

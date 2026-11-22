@@ -207,3 +207,97 @@ loop:
 	VMOVSD X0, ret+56(FP)
 	VZEROUPPER
 	RET
+
+DATA sfNegZero<>+0(SB)/8, $0x8000000000000000
+GLOBL sfNegZero<>(SB), RODATA|NOPTR, $8
+DATA sfOne<>+0(SB)/8, $0x3ff0000000000000
+GLOBL sfOne<>(SB), RODATA|NOPTR, $8
+DATA sfHalf<>+0(SB)/8, $0x3fe0000000000000
+GLOBL sfHalf<>(SB), RODATA|NOPTR, $8
+DATA sfNegOne<>+0(SB)/8, $0xbff0000000000000
+GLOBL sfNegOne<>(SB), RODATA|NOPTR, $8
+
+// func scoreFast4(n int, sums, ones *uint16, norms, aligns, scores *float32, k *float64, cos int)
+// Four rows a step in float64 lanes: the Go loop's operations in its order
+// (a doubling is x+x, a halving x*0.5, both exact), with both branches of
+// its conditions computed and blended. VMAXPD takes the square second, so
+// a zero distance is +0 as Go's max gives.
+TEXT ·scoreFast4(SB), NOSPLIT, $0-64
+	MOVQ n+0(FP), CX
+	MOVQ sums+8(FP), SI
+	MOVQ ones+16(FP), R8
+	MOVQ norms+24(FP), R9
+	MOVQ aligns+32(FP), R10
+	MOVQ scores+40(FP), DI
+	MOVQ k+48(FP), DX
+	MOVQ cos+56(FP), R11
+	VBROADCASTSD 0(DX), Y8   // delta
+	VBROADCASTSD 8(DX), Y9   // low
+	VBROADCASTSD 16(DX), Y10 // tail
+	VBROADCASTSD 24(DX), Y11 // scale
+	VBROADCASTSD 32(DX), Y12 // qn
+	VBROADCASTSD 40(DX), Y13 // q2
+	VXORPD Y14, Y14, Y14
+	SHRQ $2, CX
+	JZ   sfdone
+
+sfloop:
+	VPMOVZXWD (SI), X0
+	VCVTDQ2PD X0, Y0  // sums
+	VPMOVZXWD (R8), X1
+	VCVTDQ2PD X1, Y1  // ones
+	VCVTPS2PD (R9), Y2  // norm
+	VCVTPS2PD (R10), Y3 // align
+	VMULPD Y8, Y0, Y0  // delta*sums
+	VMULPD Y9, Y1, Y1  // low*ones
+	VADDPD Y1, Y0, Y0
+	VADDPD Y0, Y0, Y0  // 2*(...)
+	VSUBPD Y10, Y0, Y0 // - tail
+	VMULPD Y11, Y0, Y0 // * scale
+	VDIVPD Y3, Y0, Y0  // / align: ip
+	VADDPD Y2, Y2, Y4  // 2*norm
+	VMULPD Y12, Y4, Y4 // *qn
+	VMULPD Y0, Y4, Y4  // *ip
+	VMULPD Y2, Y2, Y5  // norm*norm
+	VADDPD Y13, Y5, Y5 // + q2
+	VSUBPD Y4, Y5, Y6  // - 2*norm*qn*ip
+	VCMPPD $0x1e, Y14, Y2, Y7  // norm > 0
+	VCMPPD $0x1e, Y14, Y3, Y15 // align > 0
+	VANDPD Y15, Y7, Y7
+	VBLENDVPD Y7, Y6, Y5, Y5
+	VSUBPD Y12, Y2, Y6 // gap
+	VMULPD Y6, Y6, Y6
+	VMAXPD Y6, Y5, Y5  // max(dist2, gap*gap)
+	TESTQ R11, R11
+	JNZ  sfcos
+	VBROADCASTSD sfNegZero<>(SB), Y15
+	VXORPD Y15, Y5, Y5 // -dist2
+	JMP  sfstore
+
+sfcos:
+	VBROADCASTSD sfHalf<>(SB), Y15
+	VMULPD Y15, Y5, Y5 // dist2/2
+	VBROADCASTSD sfOne<>(SB), Y15
+	VSUBPD Y5, Y15, Y5 // 1 - dist2/2
+	VBROADCASTSD sfNegOne<>(SB), Y15
+	VMAXPD Y15, Y5, Y5 // max(-1, x)
+	VBROADCASTSD sfOne<>(SB), Y15
+	VMINPD Y15, Y5, Y5 // min(1, x)
+
+sfstore:
+	VBROADCASTSD sfNegOne<>(SB), Y15
+	VCMPPD $0x00, Y15, Y3, Y7 // align == -1: a zero row
+	VBLENDVPD Y7, Y14, Y5, Y5
+	VCVTPD2PSY Y5, X5
+	VMOVUPS X5, (DI)
+	ADDQ $8, SI
+	ADDQ $8, R8
+	ADDQ $16, R9
+	ADDQ $16, R10
+	ADDQ $16, DI
+	DECQ CX
+	JNZ  sfloop
+
+sfdone:
+	VZEROUPPER
+	RET
