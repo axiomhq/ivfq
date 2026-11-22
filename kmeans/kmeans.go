@@ -206,6 +206,17 @@ func seedPlusPlus(ctx context.Context, vecs [][]float32, k int, rng *rand.Rand) 
 	for i := range d2 {
 		d2[i] = math.MaxFloat32
 	}
+	dims := len(vecs[0])
+	useDots := dims >= 8 && dims%8 == 0
+	var vNormSq []float32
+	var candBlock []float32
+	if useDots {
+		vNormSq = make([]float32, n)
+		for i, v := range vecs {
+			vNormSq[i] = float32(simd.SumSq(v))
+		}
+		candBlock = make([]float32, seedTrials*dims)
+	}
 	for len(centroids) < k {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -230,11 +241,28 @@ func seedPlusPlus(ctx context.Context, vecs [][]float32, k int, rng *rand.Rand) 
 		// OUTLIERS — a seed on the shell of a gaussian captures almost
 		// nothing and leaves a tiny hood behind. Measured at 1M x 128 dims:
 		// plain D^2 put a quarter of the hoods at 11 vectors or fewer.
-		best, bestCost := -1, math.Inf(1)
+		var cands [seedTrials]int
 		for try := 0; try < seedTrials; try++ {
-			cand := drawD2(d2, sum, rng.Float64())
-			if c := costWith(d2, vecs, vecs[cand]); c < bestCost {
-				best, bestCost = cand, c
+			cands[try] = drawD2(d2, sum, rng.Float64())
+		}
+		best, bestCost := -1, math.Inf(1)
+		if useDots {
+			var cNormSq [seedTrials]float32
+			for t, cand := range cands {
+				copy(candBlock[t*dims:(t+1)*dims], vecs[cand])
+				cNormSq[t] = vNormSq[cand]
+			}
+			costs := costWithBatch(d2, vecs, vNormSq, candBlock, cNormSq)
+			for t, cand := range cands {
+				if costs[t] < bestCost {
+					best, bestCost = cand, costs[t]
+				}
+			}
+		} else {
+			for _, cand := range cands {
+				if c := costWith(d2, vecs, vecs[cand]); c < bestCost {
+					best, bestCost = cand, c
+				}
 			}
 		}
 		centroids = append(centroids, slices.Clone(vecs[best]))
@@ -303,6 +331,70 @@ func costWith(d2 []float32, vecs [][]float32, c []float32) float64 {
 	return sum
 }
 
+// costWithBatch evaluates all seedTrials candidates in one pass over vecs,
+// using Dots3 (3 rows against 4 candidates) and ‖v-c‖² = ‖v‖² + ‖c‖² - 2v·c.
+// Summation order matches costWith's 4096-row chunks, so it is worker-count
+// invariant.
+func costWithBatch(d2 []float32, vecs [][]float32, vNormSq, candBlock []float32, cNormSq [seedTrials]float32) [seedTrials]float64 {
+	n := len(vecs)
+	chunkSum := func(lo, hi int) [seedTrials]float64 {
+		var sums [seedTrials]float64
+		var dots [3 * seedTrials]float32
+		i := lo
+		for ; i+3 <= hi; i += 3 {
+			simd.Dots3(vecs[i], vecs[i+1], vecs[i+2], candBlock, dots[:])
+			vn0, vn1, vn2 := vNormSq[i], vNormSq[i+1], vNormSq[i+2]
+			d0, d1, d2v := d2[i], d2[i+1], d2[i+2]
+			for t := range seedTrials {
+				cn := cNormSq[t]
+				s := sums[t]
+				if d := vn0 + cn - 2*dots[3*t]; d < d0 {
+					s += float64(max(d, 0))
+				} else {
+					s += float64(d0)
+				}
+				if d := vn1 + cn - 2*dots[3*t+1]; d < d1 {
+					s += float64(max(d, 0))
+				} else {
+					s += float64(d1)
+				}
+				if d := vn2 + cn - 2*dots[3*t+2]; d < d2v {
+					s += float64(max(d, 0))
+				} else {
+					s += float64(d2v)
+				}
+				sums[t] = s
+			}
+		}
+		var one [seedTrials]float32
+		for ; i < hi; i++ {
+			simd.Dots(vecs[i], candBlock, one[:])
+			vn, cur := vNormSq[i], d2[i]
+			for t := range seedTrials {
+				if d := vn + cNormSq[t] - 2*one[t]; d < cur {
+					sums[t] += float64(max(d, 0))
+				} else {
+					sums[t] += float64(cur)
+				}
+			}
+		}
+		return sums
+	}
+	if n < parallelMin {
+		return chunkSum(0, n)
+	}
+	const chunk = 4096
+	parts := make([][seedTrials]float64, (n+chunk-1)/chunk)
+	forChunks(n, chunk, func(lo, hi int) { parts[lo/chunk] = chunkSum(lo, hi) })
+	var sums [seedTrials]float64
+	for _, p := range parts {
+		for t := range seedTrials {
+			sums[t] += p[t]
+		}
+	}
+	return sums
+}
+
 // minInto lowers each d2[i] to the distance from vecs[i] to c when that is
 // closer. Same fan-out and the same independence-per-index guarantee as
 // assignAll, so the result does not depend on the worker count.
@@ -337,33 +429,87 @@ func run(ctx context.Context, vecs [][]float32, k, iters int, seed int64, spheri
 			simd.Normalize(c)
 		}
 	}
-	return lloyd(ctx, vecs, centroids, make([]int, n), iters, spherical, func(assign []int) bool {
-		return assignAll(ctx, centroids, vecs, assign)
-	})
+	return lloyd(ctx, vecs, centroids, make([]int, n), iters, spherical, nil)
 }
 
 // lloyd runs up to iters Lloyd iterations from centroids (updated in place)
 // and assign (the assignment step's starting point, updated in place) with
-// assignFn as the assignment step, then one last assignment.
+// assignFn as the assignment step (nil means assignAll), then one last
+// assignment.
 func lloyd(ctx context.Context, vecs, centroids [][]float32, assign []int, iters int, spherical bool, assignFn func([]int) bool) ([][]float32, []int, error) {
 	k := len(centroids)
 	dims := len(vecs[0])
 	sums := make([]float64, k*dims) // row c is centroid c's accumulator
 	counts := make([]int, k)
+	fuse2 := assignFn == nil && k == 2 && len(vecs)*2 < parallelMin
+	var diff []float32
+	if fuse2 {
+		diff = make([]float32, dims)
+	}
+	doAssign := func() bool {
+		if assignFn != nil {
+			return assignFn(assign)
+		}
+		return assignAll(ctx, centroids, vecs, assign)
+	}
 	for it := range iters {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		changed := assignFn(assign)
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		clear(sums)
-		clear(counts)
-		for i, v := range vecs {
-			c := assign[i]
-			counts[c]++
-			simd.AddF64(sums[c*dims:(c+1)*dims], v)
+		var changed bool
+		if fuse2 {
+			clear(sums)
+			clear(counts)
+			thresh := plane2(centroids[0], centroids[1], diff)
+			n := len(vecs)
+			const chunk = 256
+			var dots [3]float32
+			for lo := 0; lo < n && ctx.Err() == nil; lo += chunk {
+				hi := min(lo+chunk, n)
+				i := lo
+				for ; i+3 <= hi; i += 3 {
+					simd.Dots3(vecs[i], vecs[i+1], vecs[i+2], diff, dots[:])
+					for r := range 3 {
+						c := 0
+						if float64(dots[r]) < thresh {
+							c = 1
+						}
+						if c != assign[i+r] {
+							assign[i+r] = c
+							changed = true
+						}
+						counts[c]++
+						simd.AddF64(sums[c*dims:(c+1)*dims], vecs[i+r])
+					}
+				}
+				for ; i < hi; i++ {
+					c := 0
+					if float64(simd.Dot(vecs[i], diff)) < thresh {
+						c = 1
+					}
+					if c != assign[i] {
+						assign[i] = c
+						changed = true
+					}
+					counts[c]++
+					simd.AddF64(sums[c*dims:(c+1)*dims], vecs[i])
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+		} else {
+			changed = doAssign()
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			clear(sums)
+			clear(counts)
+			for i, v := range vecs {
+				c := assign[i]
+				counts[c]++
+				simd.AddF64(sums[c*dims:(c+1)*dims], v)
+			}
 		}
 		claimed := map[int]bool{} // vectors already used to reseed THIS pass
 		for c := 0; c < k; c++ {
@@ -393,7 +539,7 @@ func lloyd(ctx context.Context, vecs, centroids [][]float32, assign []int, iters
 			break
 		}
 	}
-	assignFn(assign)
+	doAssign()
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -421,8 +567,144 @@ const parallelMin = 1 << 16
 // architectures, Go versions, or any change to L2Sq's summation
 // order — floating-point k-means is only ever reproducible against a fixed
 // kernel.
+// plane2 sets diff = c0 - c1 and returns (‖c0‖² - ‖c1‖²)/2 =
+// 0.5 * Σ (c0[j]-c1[j])*(c0[j]+c1[j]). Then ‖v-c0‖² - ‖v-c1‖² =
+// 2*(thresh - v·diff), so v is closer to c1 iff v·diff < thresh.
+func plane2(c0, c1, diff []float32) float64 {
+	var s float64
+	for j, a := range c0 {
+		b := c1[j]
+		d := a - b
+		diff[j] = d
+		s += float64(d) * (float64(a) + float64(b))
+	}
+	return 0.5 * s
+}
+
 func assignAll(ctx context.Context, centroids, vecs [][]float32, assign []int) bool {
-	return assignWith(ctx, len(vecs), assign, len(centroids), func(i int) int { return Nearest(centroids, vecs[i]) })
+	k := len(centroids)
+	if k == 1 {
+		changed := false
+		for i := range assign {
+			if assign[i] != 0 {
+				assign[i] = 0
+				changed = true
+			}
+		}
+		return changed
+	}
+	dims := len(centroids[0])
+	if k == 2 {
+		diff := make([]float32, dims)
+		thresh := plane2(centroids[0], centroids[1], diff)
+		return assignChunks(ctx, len(vecs), 2, func(lo, hi int) bool {
+			changed := false
+			var dots [3]float32
+			i := lo
+			for ; i+3 <= hi; i += 3 {
+				simd.Dots3(vecs[i], vecs[i+1], vecs[i+2], diff, dots[:])
+				for r := range 3 {
+					c := 0
+					if float64(dots[r]) < thresh {
+						c = 1
+					}
+					if c != assign[i+r] {
+						assign[i+r] = c
+						changed = true
+					}
+				}
+			}
+			for ; i < hi; i++ {
+				c := 0
+				if float64(simd.Dot(vecs[i], diff)) < thresh {
+					c = 1
+				}
+				if c != assign[i] {
+					assign[i] = c
+					changed = true
+				}
+			}
+			return changed
+		})
+	}
+	if dims >= 8 && dims%8 == 0 {
+		block := make([]float32, k*dims)
+		halfNorm := make([]float32, k)
+		for c, cen := range centroids {
+			copy(block[c*dims:(c+1)*dims], cen)
+			halfNorm[c] = float32(0.5 * simd.SumSq(cen))
+		}
+		return assignChunks(ctx, len(vecs), k, func(lo, hi int) bool {
+			changed := false
+			dots := make([]float32, 3*k)
+			i := lo
+			for ; i+3 <= hi; i += 3 {
+				simd.Dots3(vecs[i], vecs[i+1], vecs[i+2], block, dots)
+				b0, d0 := 0, halfNorm[0]-dots[0]
+				b1, d1 := 0, halfNorm[0]-dots[1]
+				b2, d2 := 0, halfNorm[0]-dots[2]
+				for c := 1; c < k; c++ {
+					hn := halfNorm[c]
+					if v := hn - dots[3*c]; v < d0 {
+						b0, d0 = c, v
+					}
+					if v := hn - dots[3*c+1]; v < d1 {
+						b1, d1 = c, v
+					}
+					if v := hn - dots[3*c+2]; v < d2 {
+						b2, d2 = c, v
+					}
+				}
+				if b0 != assign[i] {
+					assign[i], changed = b0, true
+				}
+				if b1 != assign[i+1] {
+					assign[i+1], changed = b1, true
+				}
+				if b2 != assign[i+2] {
+					assign[i+2], changed = b2, true
+				}
+			}
+			one := dots[:k]
+			for ; i < hi; i++ {
+				simd.Dots(vecs[i], block, one)
+				best, bestD := 0, halfNorm[0]-one[0]
+				for c := 1; c < k; c++ {
+					if v := halfNorm[c] - one[c]; v < bestD {
+						best, bestD = c, v
+					}
+				}
+				if best != assign[i] {
+					assign[i], changed = best, true
+				}
+			}
+			return changed
+		})
+	}
+	return assignWith(ctx, len(vecs), assign, k, func(i int) int { return Nearest(centroids, vecs[i]) })
+}
+
+// assignChunks runs rangeFn on 256-row chunks of [0, n), serial or parallel,
+// polling ctx.Err() per chunk.
+func assignChunks(ctx context.Context, n, work int, rangeFn func(lo, hi int) bool) bool {
+	const chunk = 256
+	workers := min(runtime.GOMAXPROCS(0), n)
+	if workers < 2 || n*work < parallelMin {
+		changed := false
+		for lo := 0; lo < n && ctx.Err() == nil; lo += chunk {
+			if rangeFn(lo, min(lo+chunk, n)) {
+				changed = true
+			}
+		}
+		return changed
+	}
+	var changed atomic.Bool
+	forChunks(n, chunk, func(lo, hi int) {
+		if ctx.Err() == nil && rangeFn(lo, hi) {
+			changed.Store(true)
+		}
+	})
+	return changed.Load()
 }
 
 // assignWith is assignAll for any nearest-centroid rule: assign[i] =
@@ -566,12 +848,28 @@ func (c Config) FitBalanced(ctx context.Context, vecs [][]float32) ([][]float32,
 	}
 	delta := make([]float64, n)
 	order := make([]int, n)
+	diff := make([]float32, len(cents[0]))
+	var dots [3]float32
 	for it := 0; it < max(1, c.Iters); it++ {
+		thresh := plane2(cents[0], cents[1], diff)
 		left := 0
-		for i, v := range vecs {
-			delta[i] = float64(simd.L2Sq(v, cents[0]) - simd.L2Sq(v, cents[1]))
+		i := 0
+		for ; i+3 <= n; i += 3 {
+			simd.Dots3(vecs[i], vecs[i+1], vecs[i+2], diff, dots[:])
+			for r := range 3 {
+				d := 2 * (thresh - float64(dots[r]))
+				delta[i+r] = d
+				order[i+r] = i + r
+				if d < 0 {
+					left++
+				}
+			}
+		}
+		for ; i < n; i++ {
+			d := 2 * (thresh - float64(simd.Dot(vecs[i], diff)))
+			delta[i] = d
 			order[i] = i
-			if delta[i] < 0 {
+			if d < 0 {
 				left++
 			}
 		}
