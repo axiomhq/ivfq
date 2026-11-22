@@ -1058,10 +1058,8 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	if rc != nil && q.rotated != nil {
 		// Rotated: R(q-c) = Rq - Rc, no rotation per column. It subtracts
 		// after rotating, so it never rotates a tiny residual: k stays 0.
-		for j := range resid {
-			resid[j] = q.rotated[j] - rc[j]
-		}
-		n = simd.SumSq(resid)
+		copy(resid, q.rotated[:d])
+		n = simd.SubSumSq(resid, rc[:d])
 	} else {
 		copy(resid, q.Vector[:d])
 		if b.Unit {
@@ -1071,12 +1069,10 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 			for j := range resid {
 				resid[j] -= b.centroid(j)
 			}
+			n = simd.SumSq(resid)
 		} else {
-			for j, c := range b.Centroid[:d] {
-				resid[j] -= c
-			}
+			n = simd.SubSumSq(resid, b.Centroid[:d])
 		}
-		n = simd.SumSq(resid)
 		if k = residualExp(math.Sqrt(n)); k != 0 {
 			for j, x := range resid {
 				resid[j] = float32(math.Ldexp(float64(x), k))
@@ -1105,7 +1101,6 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 	} else {
 		s.planes = make([]uint64, n)
 	}
-	p0, p1, p2, p3 := s.planes[:s.words], s.planes[s.words:2*s.words], s.planes[2*s.words:3*s.words], s.planes[3*s.words:]
 	var resid2 float64
 	s.lut = lut[:0] // built on first use (tables)
 	var codeBuf [1024]byte
@@ -1128,29 +1123,7 @@ func (c *Quantizer) bind(s *bitScorer, q Query, rc []float32) {
 			resid2 += e * e
 		}
 	}
-	// Eight codes at a time: bit p of each byte, gathered into one byte
-	// (each mask times gather lands byte k's bit at bit 56+k, no carries),
-	// and the bytes' sum (at most 8*15) in the top byte of x*sum8.
-	const lsb, gather, sum8 = 0x0101010101010101, 0x0102040810204080, 0x0101010101010101
-	var codeSum uint64
-	j := 0
-	for ; j+8 <= d; j += 8 {
-		x := binary.LittleEndian.Uint64(codes[j:])
-		codeSum += x * sum8 >> 56
-		w, sh := j/64, uint(j%64)
-		p0[w] |= ((x & lsb) * gather >> 56) << sh
-		p1[w] |= ((x >> 1 & lsb) * gather >> 56) << sh
-		p2[w] |= ((x >> 2 & lsb) * gather >> 56) << sh
-		p3[w] |= ((x >> 3 & lsb) * gather >> 56) << sh
-	}
-	for ; j < d; j++ {
-		c, w, sh := uint64(codes[j]), j/64, uint(j%64)
-		codeSum += c
-		p0[w] |= (c & 1) << sh
-		p1[w] |= (c >> 1 & 1) << sh
-		p2[w] |= (c >> 2 & 1) << sh
-		p3[w] |= (c >> 3 & 1) << sh
-	}
+	codeSum := simd.Planes(codes, s.planes, s.words)
 	s.sumQ, s.resid2 = float64(codeSum), resid2
 	s.varQ = s.resid2 / float64(d)
 }

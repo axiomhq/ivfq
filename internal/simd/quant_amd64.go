@@ -30,3 +30,14 @@ func quantCodes(codes *byte, x *float32, n int, mul, lo, delta, levels float64) 
 //
 //go:noescape
 func scoreFast4(n int, sums, ones *uint16, norms, aligns, scores *float32, k *float64, cos int)
+
+// subSumSq is SubSumSq's vector part for n a multiple of 8: the four lanes'
+// sums, not yet combined.
+//
+//go:noescape
+func subSumSq(x, c *float32, n int, lanes *[4]float64)
+
+// planes32 is Planes for n a multiple of 32.
+//
+//go:noescape
+func planes32(codes *byte, n int, planes *uint64, words int) uint64

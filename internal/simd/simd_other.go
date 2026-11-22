@@ -52,3 +52,6 @@ func dots3AVX2FMA(a, b, c, block *float32, dims, rows int, out *float32) { panic
 func scoreFast4(n int, sums, ones *uint16, norms, aligns, scores *float32, k *float64, cos int) {
 	panic("unreachable")
 }
+
+func subSumSq(x, c *float32, n int, lanes *[4]float64)              { panic("unreachable") }
+func planes32(codes *byte, n int, planes *uint64, words int) uint64 { panic("unreachable") }

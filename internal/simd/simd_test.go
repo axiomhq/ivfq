@@ -3,6 +3,7 @@ package simd
 import (
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -289,6 +290,50 @@ func TestScoreFastMatchesLoop(t *testing.T) {
 				if math.Float32bits(got[i]) != math.Float32bits(want) {
 					t.Fatalf("n=%d l2=%v row %d: %v, want %v", n, l2, i, got[i], want)
 				}
+			}
+		}
+	}
+}
+
+// SubSumSq is the subtraction then SumSq, bit for bit; Planes is the
+// bit-per-plane layout and the code sum, at every tail.
+func TestSubSumSqAndPlanes(t *testing.T) {
+	r := rand.New(rand.NewPCG(5, 1))
+	for _, n := range []int{1, 3, 4, 7, 8, 9, 31, 32, 33, 64, 100, 768, 1000} {
+		x, c := make([]float32, n), make([]float32, n)
+		for i := range x {
+			x[i], c[i] = float32(r.NormFloat64()*1e3), float32(r.NormFloat64()*1e3)
+		}
+		want := make([]float32, n)
+		for i := range want {
+			want[i] = x[i] - c[i]
+		}
+		ws := SumSq(want)
+		got := SubSumSq(x, c)
+		if math.Float64bits(got) != math.Float64bits(ws) || !slices.Equal(x, want) {
+			t.Fatalf("n=%d: SubSumSq %v, want %v", n, got, ws)
+		}
+		codes := make([]byte, n)
+		var sum uint64
+		for i := range codes {
+			codes[i] = byte(r.IntN(16))
+			sum += uint64(codes[i])
+		}
+		words := (n + 63) / 64
+		planes := make([]uint64, 4*words)
+		if s := Planes(codes, planes, words); s != sum {
+			t.Fatalf("n=%d: sum %d, want %d", n, s, sum)
+		}
+		for j, cd := range codes {
+			for p := range 4 {
+				if got := planes[p*words+j/64] >> (j % 64) & 1; got != uint64(cd>>p&1) {
+					t.Fatalf("n=%d dim %d plane %d: %d", n, j, p, got)
+				}
+			}
+		}
+		for p := range 4 { // no bit past n
+			if n%64 != 0 && planes[p*words+words-1]>>(n%64) != 0 {
+				t.Fatalf("n=%d plane %d: bits past the end", n, p)
 			}
 		}
 	}

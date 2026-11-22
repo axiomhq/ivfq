@@ -301,3 +301,86 @@ sfstore:
 sfdone:
 	VZEROUPPER
 	RET
+
+// func subSumSq(x, c *float32, n int, lanes *[4]float64)
+// Eight floats a step: x -= c in float32, stored, then the low four's
+// squares and the high four's added to the four lanes in that order, as
+// sumSq adds them four at a time.
+TEXT ·subSumSq(SB), NOSPLIT, $0-32
+	MOVQ x+0(FP), SI
+	MOVQ c+8(FP), DX
+	MOVQ n+16(FP), CX
+	MOVQ lanes+24(FP), DI
+	SHRQ $3, CX
+	VXORPD Y0, Y0, Y0
+
+sssloop:
+	VMOVUPS (SI), Y1
+	VSUBPS (DX), Y1, Y1
+	VMOVUPS Y1, (SI)
+	VCVTPS2PD X1, Y2
+	VEXTRACTF128 $1, Y1, X3
+	VCVTPS2PD X3, Y3
+	VMULPD Y2, Y2, Y2
+	VADDPD Y2, Y0, Y0
+	VMULPD Y3, Y3, Y3
+	VADDPD Y3, Y0, Y0
+	ADDQ $32, SI
+	ADDQ $32, DX
+	DECQ CX
+	JNZ  sssloop
+
+	VMOVUPD Y0, (DI)
+	VZEROUPPER
+	RET
+
+// func planes32(codes *byte, n int, planes *uint64, words int) uint64
+// 32 codes a step: shifting each 16-bit word left by 7-p puts bit p of
+// both its bytes at their bit 7 (codes are below 16, so nothing of the low
+// byte reaches the high byte's bit 7), and VPMOVMSKB gathers them: 32 bits
+// of plane p, stored at the step's 4-byte slot. VPSADBW sums the codes.
+TEXT ·planes32(SB), NOSPLIT, $0-40
+	MOVQ codes+0(FP), SI
+	MOVQ n+8(FP), CX
+	MOVQ planes+16(FP), DI
+	MOVQ words+24(FP), R8
+	SHLQ $3, R8 // a plane's bytes
+	LEAQ (DI)(R8*1), R9
+	LEAQ (R9)(R8*1), R10
+	LEAQ (R10)(R8*1), R11
+	SHRQ $5, CX
+	VPXOR Y5, Y5, Y5
+	VPXOR Y6, Y6, Y6
+
+plloop:
+	VMOVDQU (SI), Y0
+	VPSADBW Y5, Y0, Y1
+	VPADDQ Y1, Y6, Y6
+	VPSLLW $7, Y0, Y1
+	VPMOVMSKB Y1, AX
+	MOVL AX, (DI)
+	VPSLLW $6, Y0, Y1
+	VPMOVMSKB Y1, AX
+	MOVL AX, (R9)
+	VPSLLW $5, Y0, Y1
+	VPMOVMSKB Y1, AX
+	MOVL AX, (R10)
+	VPSLLW $4, Y0, Y1
+	VPMOVMSKB Y1, AX
+	MOVL AX, (R11)
+	ADDQ $32, SI
+	ADDQ $4, DI
+	ADDQ $4, R9
+	ADDQ $4, R10
+	ADDQ $4, R11
+	DECQ CX
+	JNZ  plloop
+
+	VEXTRACTI128 $1, Y6, X1
+	VPADDQ X1, X6, X6
+	VPSHUFD $0x4e, X6, X1
+	VPADDQ X1, X6, X6
+	VMOVQ X6, AX
+	MOVQ AX, ret+32(FP)
+	VZEROUPPER
+	RET

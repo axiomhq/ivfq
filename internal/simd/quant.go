@@ -164,3 +164,51 @@ func ScoreFast(sums, ones []uint16, norms, aligns []float32, k *[6]float64, l2 b
 	scoreFast4(n, &sums[0], &ones[0], &norms[0], &aligns[0], &scores[0], &k[0], cos)
 	return n
 }
+
+// SubSumSq sets x[j] -= c[j] in float32 and returns SumSq of the result,
+// bit for bit, in one pass. c must be as long as x.
+func SubSumSq(x, c []float32) float64 {
+	_ = c[len(x)-1]
+	n8 := len(x) &^ 7
+	if !hasAVX2FMA || n8 == 0 {
+		for j := range x {
+			x[j] -= c[j]
+		}
+		return SumSq(x)
+	}
+	var lanes [4]float64
+	subSumSq(&x[0], &c[0], n8, &lanes)
+	for j := n8; j < len(x); j++ {
+		x[j] -= c[j]
+	}
+	n4 := len(x) &^ 3
+	for j := n8; j < n4; j++ {
+		f := float64(x[j])
+		lanes[j&3] += float64(f * f)
+	}
+	s := (lanes[0] + lanes[2]) + (lanes[1] + lanes[3])
+	for _, v := range x[n4:] {
+		f := float64(v)
+		s += float64(f * f)
+	}
+	return s
+}
+
+// Planes sets bit j%64 of planes[p*words + j/64] to bit p of codes[j]
+// (codes below 16, planes cleared by the caller) and returns Σ codes[j].
+func Planes(codes []byte, planes []uint64, words int) uint64 {
+	_ = planes[4*words-1]
+	j, sum := 0, uint64(0)
+	if hasAVX2 && len(codes) >= 32 {
+		j = len(codes) &^ 31
+		sum = planes32(&codes[0], j, &planes[0], words)
+	}
+	for ; j < len(codes); j++ {
+		c, w, sh := uint64(codes[j]), j/64, uint(j%64)
+		sum += c
+		for p := range 4 {
+			planes[p*words+w] |= (c >> p & 1) << sh
+		}
+	}
+	return sum
+}
