@@ -1170,18 +1170,23 @@ func (s *bitScorer) tables() []byte {
 	} else {
 		s.lut = make([]byte, n)
 	}
+	// subsetSums from the planes, without the codes: code k is
+	// Σ_p 2^p·(bit k of plane p's nibble), so table entry m is
+	// Σ_p 2^p·(plane p's nibble's subset sum at m), each plane's a 0/1 sum
+	// (planeSums for dimensions 0..2, its bit 3 times every byte for
+	// dimension 3). No lane passes 60: no carries.
 	w := s.words
 	p0, p1, p2, p3 := s.planes[:w], s.planes[w:2*w], s.planes[2*w:3*w], s.planes[3*w:]
-	for i := 0; i*4 < s.dims; i++ { // the last group's missing dimensions have no bits: code 0
-		// Plane p's nibble is row p of a 4x4 bit matrix whose column k is
-		// dimension k's code: transposed (two delta swaps), row k is code k.
-		g, sh := i/16, uint(i%16)*4
-		x := p0[g]>>sh&0xF | (p1[g]>>sh&0xF)<<4 | (p2[g]>>sh&0xF)<<8 | (p3[g]>>sh&0xF)<<12
-		t := (x ^ x>>3) & 0x0A0A
-		x ^= t ^ t<<3
-		t = (x ^ x>>6) & 0x00CC
-		x ^= t ^ t<<6
-		subsetSums((*[16]byte)(s.lut[16*i:]), byte(x&0xF), byte(x>>4&0xF), byte(x>>8&0xF), byte(x>>12))
+	lut := s.lut[:16*((s.dims+3)/4)] // the last group's missing dimensions have no bits: code 0
+	for g := range p0 {
+		n0, n1, n2, n3 := p0[g], p1[g], p2[g], p3[g]
+		for t := lut[min(len(lut), 256*g):min(len(lut), 256*g+256)]; len(t) >= 16; t = t[16:] {
+			lo := planeSums[n0&7] + planeSums[n1&7]<<1 + planeSums[n2&7]<<2 + planeSums[n3&7]<<3
+			c3 := n0>>3&1 | n1>>2&2 | n2>>1&4 | n3&8
+			binary.LittleEndian.PutUint64(t, lo)
+			binary.LittleEndian.PutUint64(t[8:], lo+c3*0x0101010101010101)
+			n0, n1, n2, n3 = n0>>4, n1>>4, n2>>4, n3>>4
+		}
 	}
 	return s.lut
 }

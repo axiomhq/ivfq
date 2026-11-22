@@ -1,6 +1,7 @@
 package rabitq
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -559,9 +560,18 @@ func finiteNonnegative(x float32) bool {
 
 // subsetSums sets t[m] to the sum of those of c0..c3 whose bit is set in m:
 // the 16-entry table the fast scan looks four dimensions' codes up in.
+//
+// Each code is at most 15, so no entry passes 60 and the byte lanes never
+// carry: mask k has 1 in byte m when bit k of m is set, and the high half
+// is the low half plus c3 in every byte.
 func subsetSums(t *[16]byte, c0, c1, c2, c3 byte) {
-	t[0], t[1], t[2], t[3] = 0, c0, c1, c0+c1
-	t[4], t[5], t[6], t[7] = c2, c0+c2, c1+c2, c0+c1+c2
-	t[8], t[9], t[10], t[11] = c3, c0+c3, c1+c3, c0+c1+c3
-	t[12], t[13], t[14], t[15] = c2+c3, c0+c2+c3, c1+c2+c3, c0+c1+c2+c3
+	lo := uint64(c0)*sumBit0 + uint64(c1)*sumBit1 + uint64(c2)*sumBit2
+	binary.LittleEndian.PutUint64(t[:8], lo)
+	binary.LittleEndian.PutUint64(t[8:], lo+uint64(c3)*0x0101010101010101)
 }
+
+const sumBit0, sumBit1, sumBit2 = 0x0100010001000100, 0x0101000001010000, 0x0101010100000000
+
+// planeSums[n] is subsetSums' low half for the 0/1 codes n&1, n>>1&1, n>>2&1.
+var planeSums = [8]uint64{0, sumBit0, sumBit1, sumBit0 + sumBit1, sumBit2,
+	sumBit0 + sumBit2, sumBit1 + sumBit2, sumBit0 + sumBit1 + sumBit2}
