@@ -78,3 +78,26 @@ func TestDots3(t *testing.T) {
 		hasAVX2FMA = old
 	}
 }
+
+func BenchmarkDots3(b *testing.B) {
+	const dims = 768
+	rng := rand.New(rand.NewPCG(1, 2))
+	vec := func(n int) []float32 {
+		v := make([]float32, n)
+		for i := range v {
+			v[i] = float32(rng.NormFloat64())
+		}
+		return v
+	}
+	a, bb, c := vec(dims), vec(dims), vec(dims)
+	for _, rows := range []int{1, 4, 42} {
+		block := vec(dims * rows)
+		out := make([]float32, 3*rows)
+		name := map[int]string{1: "3x1x768", 4: "3x4x768", 42: "3x42x768"}[rows]
+		b.Run(name, func(b *testing.B) {
+			for b.Loop() {
+				Dots3(a, bb, c, block, out)
+			}
+		})
+	}
+}
