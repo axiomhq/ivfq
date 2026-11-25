@@ -61,4 +61,4 @@ func planesLUTAVX2(planes *uint64, words int, lut *byte, pairs int, tbl *byte) {
 func unpack1BitAVX2(dst, base *float32, words *uint64, n int, s float32) { panic("unreachable") }
 func subStoreSumSq(dst, a, b *float32, n int, lanes *[4]float64)         { panic("unreachable") }
 func signAbsAVX2(x *float32, n int, words *uint64, lanes *[4]float64)    { panic("unreachable") }
-func codesLUTAVX2(codes, lut *byte, pairs int)                            { panic("unreachable") }
+func codesLUTAVX2(codes, lut *byte, pairs int)                           { panic("unreachable") }
