@@ -355,3 +355,45 @@ func FuzzUnmarshalBinary(f *testing.F) {
 		}
 	})
 }
+
+func TestAppendRotatedRowsMatchesAppendRows(t *testing.T) {
+	const dims, rows = 128, 32
+	v := corpus(rows, dims)
+	rot := NewRotation(7, dims)
+	for _, metric := range []ivfq.Metric{ivfq.L2, ivfq.Cosine} {
+		c0, err := Empty(v[0], Options{Metric: metric, Rotation: rot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := AppendRows(c0, rot, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc := RotateCentroid(c0.Code.Centroid, rot)
+		rv := make([][]float32, rows)
+		for i, row := range v {
+			cp := append([]float32(nil), row...)
+			if metric == ivfq.Cosine {
+				ivfq.Normalize(cp)
+			}
+			rot.Apply(cp)
+			rv[i] = cp
+		}
+		b, err := AppendRotatedRows(c0, rot, rc, rv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := NewQuery(v[3], metric, rot)
+		q2 := NewQuery(v[3], metric, rot).WithRotated(rot, rv[3])
+		var sa, sb Scorer
+		sa.BindRotated(&a, q.Rotated(rot), rc)
+		sb.BindRotated(&b, q2, rc)
+		for r := range rows {
+			ea, ba := sa.ScoreAndBound(r)
+			eb, bb := sb.ScoreAndBound(r)
+			if math.Abs(float64(ea-eb)) > 1e-4 || math.Abs(float64(ba-bb)) > 1e-4 {
+				t.Fatalf("metric=%v row=%d: (%v,%v) vs (%v,%v)", metric, r, ea, ba, eb, bb)
+			}
+		}
+	}
+}

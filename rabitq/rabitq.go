@@ -847,6 +847,29 @@ func (b *Code) fillRow(i int, row []float32, rot *Rotation, scratch []float32) {
 	}
 }
 
+func (b *Code) fillRowRotated(i int, rotRow, rc, scratch []float32) {
+	dims := len(b.Centroid)
+	w := bitWords(dims)
+	n := math.Sqrt(simd.SubStoreSumSq(scratch, rotRow, rc))
+	b.Norms[i] = float32(n)
+	if b.Norms[i] == 0 {
+		return
+	}
+	k := residualExp(n)
+	if k != 0 {
+		for j, x := range scratch {
+			scratch[j] = float32(math.Ldexp(float64(x), k))
+		}
+	}
+	words := b.Words[i*w : (i+1)*w]
+	absSum := simd.SignAbs(scratch, words)
+	align := absSum / (math.Ldexp(n, k) * math.Sqrt(float64(dims)))
+	b.Aligns[i] = float32(min(1, align))
+	if b.ExBits > 0 {
+		b.fillEx(i, scratch)
+	}
+}
+
 // newBitScorer is small enough to inline, so a Scorer kept in a local
 // variable keeps its bitScorer on the caller's stack.
 func (c *Quantizer) newBitScorer(q Query) *bitScorer {

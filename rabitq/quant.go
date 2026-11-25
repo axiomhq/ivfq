@@ -211,6 +211,40 @@ func AppendRows(c Quantizer, rot *Rotation, vectors [][]float32) (Quantizer, err
 	return Quantizer{Dims: dims, Code: out}, nil
 }
 
+// AppendRotatedRows appends pre-rotated vectors (already normalized when c is
+// cosine, and already transformed by rot.Apply) using the pre-rotated centroid
+// rc = RotateCentroid(c.Code.Centroid, rot), avoiding a second FWHT rotation.
+func AppendRotatedRows(c Quantizer, rot *Rotation, rc []float32, rotated [][]float32) (Quantizer, error) {
+	b := c.Code
+	if b == nil {
+		return Quantizer{}, errors.New("rabitq: append on a column with no payload")
+	}
+	dims := c.Dims
+	if rot == nil || rot.seed != b.Seed || rot.dims != dims || len(rc) != dims {
+		return Quantizer{}, fmt.Errorf("rabitq: append rotated needs the column's rotation and rotated centroid (seed %d, %d wide)", b.Seed, dims)
+	}
+	rows := b.Rows()
+	out := b.copyRows(dims, rows, len(rotated), nil)
+	scratch := make([]float32, dims)
+	for i, rv := range rotated {
+		if len(rv) != dims {
+			return Quantizer{}, fmt.Errorf("rabitq: appended rotated row %d is %d-wide, the column is %d", i, len(rv), dims)
+		}
+		if b.Unit {
+			var normSq float64
+			for _, x := range rv {
+				normSq += float64(x) * float64(x)
+			}
+			if normSq == 0 {
+				out.Aligns[rows+i] = zeroRowAlign
+				continue
+			}
+		}
+		out.fillRowRotated(rows+i, rv, rc, scratch)
+	}
+	return Quantizer{Dims: dims, Code: out}, nil
+}
+
 // copyEx copies row r's ex code of b into row j of out.
 func (b *Code) copyEx(out *Code, j, r int) {
 	w := bitWords(b.width())
@@ -405,6 +439,18 @@ func (q Query) Rotated(rot *Rotation) Query {
 	}
 	rot.Apply(v)
 	q.rotated = v
+	return q
+}
+
+// WithRotated attaches a caller-provided pre-rotated query vector (rot.Apply
+// already applied, and normalized if Metric == Cosine) to avoid per-query
+// allocation and redundant rotation.
+func (q Query) WithRotated(rot *Rotation, rotated []float32) Query {
+	if rot == nil || len(rotated) != rot.dims {
+		return q
+	}
+	q.Rotation = rot
+	q.rotated = rotated
 	return q
 }
 
